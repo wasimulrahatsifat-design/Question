@@ -14,11 +14,11 @@ export async function POST(req) {
       apiKey: customApiKey 
     } = body;
 
-    const apiKey = process.env.GEMINI_API_KEY || customApiKey;
+    const apiKey = (customApiKey && customApiKey.trim()) || process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
       return NextResponse.json(
-        { error: 'Gemini API Key is missing.' },
+        { error: 'Gemini API Key পাওয়া যায়নি।' },
         { status: 400 }
       );
     }
@@ -59,11 +59,10 @@ ${instructionDetails}
 ২. ভাষা সম্পূর্ণ প্রমিত বাংলা হতে হবে।`;
 
     const candidateModels = [
-      'gemini-3.6-flash',
-      'gemini-3.6-pro',
       'gemini-2.0-flash',
       'gemini-1.5-flash',
-      'gemini-flash-latest'
+      'gemini-2.0-flash-lite',
+      'gemini-1.5-pro'
     ];
 
     let newAnswer = '';
@@ -99,8 +98,17 @@ ${instructionDetails}
     });
   } catch (error) {
     console.error('Answer Refinement Error:', error);
+    let errMsg = error.message || 'Failed to refine answer.';
+    if (
+      errMsg.includes('401') || 
+      errMsg.includes('UNAUTHENTICATED') || 
+      errMsg.includes('invalid authentication credentials') ||
+      errMsg.includes('ACCESS_TOKEN_TYPE_UNSUPPORTED')
+    ) {
+      errMsg = 'Gemini API Key সঠিক নয় বা অকার্যকর! অনুগ্রহ করে Google AI Studio থেকে সঠিক API Key দিন।';
+    }
     return NextResponse.json(
-      { error: error.message || 'Failed to refine answer.' },
+      { error: errMsg },
       { status: 500 }
     );
   }

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { convertPdfPagesToBase64 } from '../lib/pdfProcessor';
+import Link from 'next/link';
 import { exportQuestionPaperDocx, toBengaliNumerals, cleanOptionText, cleanQuestionText } from '../lib/docxGenerator';
 import { 
   DEFAULT_CLASSES,
@@ -17,14 +17,14 @@ import {
   DEFAULT_CURRICULUM_PRESETS 
 } from '../lib/curriculumPresets';
 import { 
-  saveBookPdf, 
-  loadBookPdf, 
-  deleteBookPdf, 
-  getAllStoredBooks, 
+  getSources, 
   formatBytes 
-} from '../lib/pdfStorage';
+} from '../lib/sourceStorage';
+import { processSelectedSources } from '../lib/sourceProcessor';
 import { 
   FileText, 
+  Image as ImageIcon,
+  FileCode,
   Sparkles, 
   Download, 
   Trash2, 
@@ -34,7 +34,6 @@ import {
   Loader2, 
   BookOpen, 
   GraduationCap, 
-  Key, 
   FileCheck,
   Settings2,
   X,
@@ -52,7 +51,9 @@ import {
   BookMarked,
   FolderOpen,
   UploadCloud,
-  HardDrive
+  HardDrive,
+  ExternalLink,
+  KeyRound
 } from 'lucide-react';
 
 const bnLetters = ['ক)', 'খ)', 'গ)', 'ঘ)', 'ঙ)', 'চ)', 'ছ)', 'জ)', 'ঝ)', 'ঞ)'];
@@ -87,12 +88,10 @@ export default function PdfQuestionGeneratorPage() {
   const [customPromptOpenKey, setCustomPromptOpenKey] = useState(null);
   const [customPromptText, setCustomPromptText] = useState('');
   
-  // PDF Selection & Persistent Storage
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [storedBookInfo, setStoredBookInfo] = useState(null);
-  const [isLoadingBook, setIsLoadingBook] = useState(false);
-  const [startPage, setStartPage] = useState(1);
-  const [endPage, setEndPage] = useState(2);
+  // Multi-source Selection States (PDFs, Images, Text Notes)
+  const [availableSources, setAvailableSources] = useState([]);
+  const [selectedSourceConfigs, setSelectedSourceConfigs] = useState({}); // { [id]: { selected: boolean, startPage: number, endPage: number } }
+  const [isLoadingSources, setIsLoadingSources] = useState(false);
   
   // Section Configuration for Current Class & Subject
   const [sectionList, setSectionList] = useState(() => loadSectionsForSubject('পঞ্চম', 'বিজ্ঞান'));
@@ -104,7 +103,7 @@ export default function PdfQuestionGeneratorPage() {
 
   // Admin Setup Modal State
   const [showAdminModal, setShowAdminModal] = useState(false);
-  const [adminActiveTab, setAdminActiveTab] = useState('sections'); // 'sections' | 'subjects' | 'classes' | 'books'
+  const [adminActiveTab, setAdminActiveTab] = useState('sections'); // 'sections' | 'subjects' | 'classes'
   const [adminClass, setAdminClass] = useState('পঞ্চম');
   const [adminSubject, setAdminSubject] = useState('বিজ্ঞান');
   const [adminClassSubjects, setAdminClassSubjects] = useState(() => loadSubjectsForClass('পঞ্চম'));
@@ -122,13 +121,23 @@ export default function PdfQuestionGeneratorPage() {
   const [editingClassIdx, setEditingClassIdx] = useState(null);
   const [editingClassName, setEditingClassName] = useState('');
 
-  // API Key & Status
-  const [userApiKey, setUserApiKey] = useState('');
-  const [showKeyInput, setShowKeyInput] = useState(false);
+  // Status & AI Generation
   const [statusMessage, setStatusMessage] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [generatedData, setGeneratedData] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
+  const [userApiKey, setUserApiKey] = useState('');
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState('');
+
+  // Load API Key on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const savedKey = localStorage.getItem('gemini_api_key') || '';
+      setUserApiKey(savedKey);
+      setApiKeyInput(savedKey);
+    }
+  }, []);
 
   // When selectedClass changes in main UI, load that class's subjects & ensure valid subject
   useEffect(() => {
@@ -147,30 +156,36 @@ export default function PdfQuestionGeneratorPage() {
     }
   }, [selectedClass, selectedSubject]);
 
-  // When selectedClass or selectedSubject changes, automatically check and load persistent PDF from IndexedDB
+  // When selectedClass or selectedSubject changes, load available sources from storage
   useEffect(() => {
     let isCancelled = false;
-    async function checkStoredPdf() {
+    async function fetchSources() {
       if (!selectedClass || !selectedSubject) return;
-      setIsLoadingBook(true);
+      setIsLoadingSources(true);
       try {
-        const stored = await loadBookPdf(selectedClass, selectedSubject);
+        const list = await getSources({ className: selectedClass, subject: selectedSubject });
         if (!isCancelled) {
-          if (stored && stored.file) {
-            setSelectedFile(stored.file);
-            setStoredBookInfo(stored);
-          } else {
-            setSelectedFile(null);
-            setStoredBookInfo(null);
-          }
+          setAvailableSources(list);
+          const configs = {};
+          list.forEach((s) => {
+            const hasChaps = Array.isArray(s.chapters) && s.chapters.length > 0;
+            configs[s.id] = {
+              selected: true,
+              mode: hasChaps ? 'chapters' : 'pages',
+              selectedChapterIds: hasChaps ? [s.chapters[0].id] : [],
+              startPage: 1,
+              endPage: s.type === 'pdf' ? Math.min(s.pageCount || 1, 5) : 1,
+            };
+          });
+          setSelectedSourceConfigs(configs);
         }
-      } catch (e) {
-        console.warn('Failed to load book from IndexedDB:', e);
+      } catch (err) {
+        console.warn('Error loading sources:', err);
       } finally {
-        if (!isCancelled) setIsLoadingBook(false);
+        if (!isCancelled) setIsLoadingSources(false);
       }
     }
-    checkStoredPdf();
+    fetchSources();
     return () => { isCancelled = true; };
   }, [selectedClass, selectedSubject]);
 
@@ -187,9 +202,6 @@ export default function PdfQuestionGeneratorPage() {
       const loaded = loadSectionsForSubject(adminClass, targetSubject);
       setAdminSections(loaded);
       setAdminSuccessMsg('');
-
-      // If opening books library tab, load all stored books
-      getAllStoredBooks().then((books) => setAdminStoredBooks(books));
     }
   }, [showAdminModal, adminClass]);
 
@@ -443,62 +455,46 @@ export default function PdfQuestionGeneratorPage() {
     setTimeout(() => setAdminSuccessMsg(''), 3000);
   };
 
-  // Handle PDF file upload and store persistently in IndexedDB
-  const handleFileChange = async (e) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
-        setErrorMessage('অনুগ্রহ করে একটি সঠিক PDF ফাইল নির্বাচন করুন।');
-        return;
-      }
-      setErrorMessage('');
-      setSelectedFile(file);
-
-      try {
-        const saved = await saveBookPdf(selectedClass, selectedSubject, file);
-        setStoredBookInfo(saved);
-        setStatusMessage(`✅ ${selectedClass} শ্রেণি - ${selectedSubject} বিষয়ের পাঠ্যবই সফলভাবে সংরক্ষিত হয়েছে!`);
-        setTimeout(() => setStatusMessage(''), 4000);
-        // Refresh admin books list
-        getAllStoredBooks().then((books) => setAdminStoredBooks(books));
-      } catch (err) {
-        console.error('Failed to save to IndexedDB:', err);
-      }
-    }
-  };
-
-  // Delete current class & subject's stored PDF
-  const handleDeleteCurrentBook = async () => {
-    if (!confirm(`আপনি কি "${selectedClass} শ্রেণি - ${selectedSubject}" বিষয়ের সংরক্ষিত পাঠ্যবইটি মুছে ফেলতে চান?`)) return;
-    await deleteBookPdf(selectedClass, selectedSubject);
-    setSelectedFile(null);
-    setStoredBookInfo(null);
-    getAllStoredBooks().then((books) => setAdminStoredBooks(books));
-  };
-
-  // Delete from Admin Library tab
-  const handleAdminDeleteBook = async (cls, sub) => {
-    if (!confirm(`আপনি কি "${cls} শ্রেণি - ${sub}" বিষয়ের সংরক্ষিত পাঠ্যবইটি মুছে ফেলতে চান?`)) return;
-    await deleteBookPdf(cls, sub);
-    if (selectedClass === cls && selectedSubject === sub) {
-      setSelectedFile(null);
-      setStoredBookInfo(null);
-    }
-    const updated = await getAllStoredBooks();
-    setAdminStoredBooks(updated);
-    setAdminSuccessMsg(`"${cls} শ্রেণি - ${sub}" বিষয়ের পাঠ্যবই মুছে ফেলা হয়েছে!`);
-    setTimeout(() => setAdminSuccessMsg(''), 3000);
-  };
-
-  // Trigger Client-Side Processing & AI Generation
+  // Trigger Client-Side Processing & AI Generation for all selected sources
   const handleGenerateQuestions = async () => {
-    if (!selectedFile) {
-      setErrorMessage('প্রথমে একটি পাঠ্যবইয়ের PDF ফাইল আপলোড বা নির্বাচন করুন।');
-      return;
-    }
+    const selectedItems = [];
+    availableSources.forEach((src) => {
+      const cfg = selectedSourceConfigs[src.id];
+      if (cfg && cfg.selected) {
+        if (
+          src.type === 'pdf' &&
+          cfg.mode === 'chapters' &&
+          Array.isArray(src.chapters) &&
+          src.chapters.length > 0
+        ) {
+          const selectedChaps = src.chapters.filter((c) =>
+            (cfg.selectedChapterIds || []).includes(c.id)
+          );
+          if (selectedChaps.length > 0) {
+            selectedItems.push({
+              source: src,
+              selectedChapters: selectedChaps,
+            });
+          } else {
+            // fallback if no chapter specifically checked
+            selectedItems.push({
+              source: src,
+              startPage: cfg.startPage || 1,
+              endPage: cfg.endPage || 1,
+            });
+          }
+        } else {
+          selectedItems.push({
+            source: src,
+            startPage: cfg.startPage || 1,
+            endPage: cfg.endPage || 1,
+          });
+        }
+      }
+    });
 
-    if (startPage > endPage) {
-      setErrorMessage('শুরুর পৃষ্ঠা শেষের পৃষ্ঠার চেয়ে বড় হতে পারবে না।');
+    if (selectedItems.length === 0) {
+      setErrorMessage('অনুগ্রহ করে প্রশ্নপত্র তৈরি করতে কমপক্ষে একটি সোর্স বা অধ্যায় নির্বাচন করুন।');
       return;
     }
 
@@ -511,24 +507,27 @@ export default function PdfQuestionGeneratorPage() {
     try {
       setIsProcessing(true);
       setErrorMessage('');
-      setStatusMessage('ব্রাউজারে PDF পেজগুলো ক্যানভাসে রেন্ডার করে ছবি তৈরি করা হচ্ছে...');
+      setStatusMessage('নির্বাচিত সোর্সসমূহ প্রস্তুত করা হচ্ছে...');
 
-      // Step 1: Render PDF to Base64 in browser
-      const base64Images = await convertPdfPagesToBase64(selectedFile, Number(startPage), Number(endPage));
+      // Step 1: Process all selected sources (PDF pages to images, image base64, text notes)
+      const { images, textSources } = await processSelectedSources(selectedItems, (msg) => {
+        setStatusMessage(msg);
+      });
 
-      setStatusMessage(`Gemini AI দ্বারা ${base64Images.length}টি পৃষ্ঠার তথ্য বিশ্লেষণ ও প্রশ্ন তৈরি হচ্ছে...`);
+      setStatusMessage(`Gemini AI দ্বারা ${images.length}টি চিত্র ও ${textSources.length}টি নোটের তথ্য বিশ্লেষণ করে প্রশ্ন তৈরি হচ্ছে...`);
 
-      // Step 2: Send Base64 images to API route
+      // Step 2: Send Base64 images and text sources to API route
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          images: base64Images,
+          images,
+          textSources,
           className: selectedClass,
           subject: selectedSubject,
           requestedSections: activeSections,
           language,
-          apiKey: userApiKey || undefined,
+          apiKey: userApiKey ? userApiKey.trim() : undefined,
         }),
       });
 
@@ -552,9 +551,10 @@ export default function PdfQuestionGeneratorPage() {
 
       setGeneratedData(result.data);
       setStatusMessage('');
+      setErrorMessage('');
     } catch (err) {
       console.error('Generation Catch Error:', err);
-      let errorText = 'প্রশ্নপত্র তৈরি করতে সমস্যা হয়েছে। অনুগ্রহ করে PDF ফাইল ও পেজ নম্বর চেক করুন।';
+      let errorText = 'প্রশ্নপত্র তৈরি করতে সমস্যা হয়েছে। অনুগ্রহ করে সোর্স ও পৃষ্ঠা নম্বর ঠিক আছে কি না তা যাচাই করুন।';
       if (err instanceof Error && err.message) {
         errorText = err.message;
       } else if (typeof err === 'string') {
@@ -568,11 +568,47 @@ export default function PdfQuestionGeneratorPage() {
     }
   };
 
-  // Question editing handlers
+  // Save or clear user Gemini API Key
+  const handleSaveApiKey = (e) => {
+    e.preventDefault();
+    const cleanKey = apiKeyInput.trim();
+    if (cleanKey) {
+      localStorage.setItem('gemini_api_key', cleanKey);
+      setUserApiKey(cleanKey);
+      setShowApiKeyModal(false);
+      setErrorMessage('');
+      alert('Gemini API Key সফলভাবে সংরক্ষিত হয়েছে!');
+    } else {
+      localStorage.removeItem('gemini_api_key');
+      setUserApiKey('');
+      setShowApiKeyModal(false);
+      alert('Gemini API Key মুছে ফেলা হয়েছে (এখন .env.local এর কী ব্যবহৃত হবে)।');
+    }
+  };
+
+  // Question and section title editing handlers
+  const handleSectionTitleChange = (sectionIndex, newTitle) => {
+    setGeneratedData((prev) => {
+      if (!prev || !prev.sections) return prev;
+      const updated = JSON.parse(JSON.stringify(prev));
+      if (updated.sections[sectionIndex]) {
+        updated.sections[sectionIndex].title = newTitle;
+      }
+      return updated;
+    });
+  };
+
+  const cleanPoemDisplay = (text) => {
+    if (!text) return '';
+    return text.replace(/^[০-৯0-9]+[\।\.\-\)\s]+/, '').trim();
+  };
+
   const handleQuestionTextChange = (sectionIndex, qIndex, newText) => {
     setGeneratedData((prev) => {
       const updated = JSON.parse(JSON.stringify(prev));
-      updated.sections[sectionIndex].questions[qIndex].questionText = newText;
+      if (updated.sections[sectionIndex]?.questions?.[qIndex]) {
+        updated.sections[sectionIndex].questions[qIndex].questionText = newText;
+      }
       return updated;
     });
   };
@@ -677,11 +713,226 @@ export default function PdfQuestionGeneratorPage() {
     });
   };
 
-  // Split sections for Preview (Left side has Header + Sec 1..2, Right side has Sec 3..7)
+  // Split sections for Preview (Left side has Header + Sec 1..6, Right side has Sec 7..10 for standard Bengali papers)
   const previewSections = generatedData?.sections || [];
-  const previewSplitIndex = previewSections.length >= 6 ? 2 : Math.ceil(previewSections.length / 2);
+  const previewSplitIndex = previewSections.length >= 8 ? 6 : Math.ceil(previewSections.length / 2);
   const leftColSections = previewSections.slice(0, previewSplitIndex);
   const rightColSections = previewSections.slice(previewSplitIndex);
+
+  // Helper to render a question section in the Question Paper preview
+  const renderQuestionPaperSection = (section, sIndex) => {
+    const qCount = section.questions?.length || 0;
+    const markPerQ = section.marksPerQuestion || 1;
+    const totalSecMarks = qCount * markPerQ;
+
+    const isVocab = section.id?.includes('vocab') || section.title?.includes('শব্দার্থ');
+    const isSentence = section.id?.includes('sentence') || section.title?.includes('বাক্য গঠন');
+    const isPoem = section.id?.includes('poem') || section.title?.includes('কবিতা');
+    const isPunctuation = section.id?.includes('punctuation') || section.title?.includes('বিরাম');
+    const isConjunct = section.id?.includes('conjunct') || section.title?.includes('যুক্তবর্ণ');
+    const isInlineComma = isVocab || isSentence || isConjunct;
+    const isSinglePrompt = isPunctuation || ((section.id?.includes('theme') || section.id?.includes('desc') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('রচনা') || section.title?.includes('বর্ণনামূলক')) && section.questions?.length <= 1);
+    const isMatchSec = section.id?.includes('match') || section.title?.includes('মিল') || section.title?.toLowerCase().includes('match');
+    const isMcq = section.id?.includes('mcq') || section.title?.includes('সঠিক উত্তর') || (section.questions?.[0]?.options?.length > 0);
+
+    return (
+      <div key={section.id || sIndex} className="space-y-2 pt-2">
+        {/* Section Header */}
+        {isPoem ? (
+          <div className="flex items-center justify-between border-b border-slate-200 pb-1">
+            <div className="flex items-center space-x-1.5 flex-1 mr-2">
+              <span className="text-sm font-bold text-slate-900 flex-shrink-0">
+                {toBengaliNumerals(sIndex + 1)}।
+              </span>
+              <input
+                type="text"
+                value={cleanPoemDisplay(section.questions?.[0]?.questionText || section.title)}
+                onChange={(e) => {
+                  const cleaned = cleanPoemDisplay(e.target.value);
+                  handleQuestionTextChange(sIndex, 0, cleaned);
+                  handleSectionTitleChange(sIndex, cleaned);
+                }}
+                className="text-sm font-bold text-slate-900 w-full p-1 bg-transparent hover:bg-slate-100 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded border-0"
+                placeholder="“কবিতার নাম” কবিতা লিখ কবির নামসহ ১ম ৮ লাইন।"
+              />
+            </div>
+            <span className="text-sm font-bold text-slate-800 flex-shrink-0">
+              {toBengaliNumerals(totalSecMarks, true)}
+            </span>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between border-b border-slate-200 pb-1">
+            <span className="text-sm font-bold text-slate-900">
+              {toBengaliNumerals(sIndex + 1)}। {section.title}
+            </span>
+            <span className="text-sm font-bold text-slate-800">
+              {toBengaliNumerals(totalSecMarks, true)}
+            </span>
+          </div>
+        )}
+
+        {/* 1. Comma-separated single line words (শব্দার্থ, বাক্য গঠন, যুক্তবর্ণ) */}
+        {isInlineComma ? (
+          <div className="space-y-2">
+            <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-medium text-slate-900 leading-relaxed">
+              {section.questions?.map((q) => q.questionText).filter(Boolean).join(', ') || (
+                <span className="text-slate-400 italic">কোনো শব্দ নেই</span>
+              )}
+            </div>
+            {/* Word Chips / Quick Editor */}
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              {section.questions?.map((q, qIndex) => (
+                <div key={q.id || qIndex} className="inline-flex items-center bg-white border border-slate-300 rounded-lg px-2 py-1 shadow-2xs">
+                  <input
+                    type="text"
+                    value={q.questionText}
+                    onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                    className="text-xs font-semibold text-slate-800 w-20 sm:w-24 focus:outline-none"
+                    placeholder="শব্দ..."
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                    className="text-slate-300 hover:text-red-500 ml-1 p-0.5"
+                    title="মুছে ফেলুন"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => handleAddQuestion(sIndex)}
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-bold inline-flex items-center px-2 py-1 bg-indigo-50 border border-indigo-200 rounded-lg"
+              >
+                <Plus className="w-3 h-3 mr-0.5" /> শব্দ যোগ
+              </button>
+            </div>
+          </div>
+        ) : isPoem ? (
+          /* Poem is fully displayed on the top header line without extra boxes */
+          null
+        ) : isSinglePrompt ? (
+          /* 2. Single Prompt (বিরাম চিহ্ন, বর্ণনামূলক প্রশ্ন / রচনা) - No ক) */
+          <div className="space-y-2">
+            {section.questions?.map((q, qIndex) => (
+              <div key={q.id || qIndex} className="flex items-start justify-between gap-2">
+                <textarea
+                  value={q.questionText}
+                  onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                  rows={isPunctuation ? 3 : 2}
+                  className="w-full text-sm p-2 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 font-medium"
+                  placeholder="প্রশ্ন বা অনুচ্ছেদ লিখুন..."
+                />
+                <button
+                  onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                  className="text-slate-300 hover:text-red-500 p-0.5 flex-shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+            {(!section.questions || section.questions.length === 0) && (
+              <button
+                onClick={() => handleAddQuestion(sIndex)}
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center pt-1"
+              >
+                <Plus className="w-3.5 h-3.5 mr-0.5" /> প্রশ্ন যোগ
+              </button>
+            )}
+          </div>
+        ) : isMatchSec && section.questions?.length > 0 ? (
+          /* 3. Matching Table */
+          <div className="border border-slate-400 rounded-lg overflow-hidden text-xs">
+            <div className="grid grid-cols-2 bg-slate-100 p-1.5 font-bold text-slate-800 border-b border-slate-400 text-center">
+              <div className="border-r border-slate-400">বামপাশ</div>
+              <div>ডানপাশ</div>
+            </div>
+            <div className="divide-y divide-slate-300">
+              {section.questions.map((q, qIndex) => (
+                <div key={q.id || qIndex} className="grid grid-cols-2 text-xs">
+                  <div className="p-1.5 border-r border-slate-300 flex items-center space-x-1.5">
+                    <span className="font-bold text-slate-600">{bnLetters[qIndex] || `(${qIndex + 1})`}</span>
+                    <input
+                      type="text"
+                      value={q.questionText}
+                      onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                      className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div className="p-1.5 flex items-center space-x-1.5">
+                    <input
+                      type="text"
+                      value={q.answer}
+                      onChange={(e) => handleAnswerTextChange(sIndex, qIndex, e.target.value)}
+                      className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-emerald-500 text-emerald-900 font-medium"
+                    />
+                    <button
+                      onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                      className="text-slate-300 hover:text-red-500 p-0.5"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          /* 4. Standard List Questions (শূন্যস্থান, সাধারণ প্রশ্ন, সত্য-মিথ্যা) */
+          <div className="space-y-2">
+            {section.questions?.map((q, qIndex) => {
+              const subPrefix = isMcq ? `${toBengaliNumerals(qIndex + 1)}) ` : `${bnLetters[qIndex] || `(${qIndex + 1})`} `;
+              return (
+                <div key={q.id || qIndex} className="space-y-1 text-sm">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="font-bold text-slate-700 flex-shrink-0">{subPrefix}</span>
+                    <textarea
+                      value={q.questionText}
+                      onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                      rows={1}
+                      className="w-full text-sm p-1.5 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500"
+                    />
+                    <button
+                      onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                      className="text-slate-300 hover:text-red-500 p-0.5 flex-shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  {/* 2 Options for MCQs */}
+                  {q.options && q.options.length > 0 && (
+                    <div className="grid grid-cols-2 gap-2 pl-4">
+                      {q.options.slice(0, 2).map((opt, optIndex) => (
+                        <div key={optIndex} className="flex items-center space-x-1.5">
+                          <span className="text-xs font-bold text-slate-600">
+                            {bnOptPrefixes[optIndex] || `${optIndex + 1}.`}
+                          </span>
+                          <input
+                            type="text"
+                            value={opt}
+                            onChange={(e) => handleOptionChange(sIndex, qIndex, optIndex, e.target.value)}
+                            className="w-full text-xs px-2 py-1 border border-slate-200 rounded-lg"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <button
+              onClick={() => handleAddQuestion(sIndex)}
+              className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center pt-1"
+            >
+              <Plus className="w-3.5 h-3.5 mr-0.5" /> প্রশ্ন যোগ
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 pb-16 font-sans">
@@ -697,12 +948,29 @@ export default function PdfQuestionGeneratorPage() {
                 পিডিএফ থেকে প্রশ্নপত্র জেনারেটর
               </h1>
               <p className="text-[11px] text-slate-500">
-                কালপুরুষ ফন্ট • A4 Landscape ২-কলাম প্রশ্নপত্র
+                A4 Landscape ২-কলাম স্ট্যান্ডার্ড প্রশ্নপত্র ও উত্তরপত্র
               </p>
             </div>
           </div>
           
           <div className="flex items-center space-x-2">
+            <button
+              type="button"
+              onClick={() => {
+                setApiKeyInput(userApiKey);
+                setShowApiKeyModal(true);
+              }}
+              className={`inline-flex items-center px-3 py-1.5 text-xs font-bold rounded-lg border transition shadow-2xs ${
+                userApiKey 
+                  ? 'text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border-emerald-200' 
+                  : 'text-amber-800 bg-amber-50 hover:bg-amber-100 border-amber-200'
+              }`}
+              title="Gemini AI API Key কনফিগার করুন"
+            >
+              <KeyRound className="w-3.5 h-3.5 mr-1.5" />
+              <span>{userApiKey ? 'API Key সেট করা আছে' : 'Gemini API Key'}</span>
+            </button>
+
             <button
               onClick={() => {
                 setAdminClass(selectedClass);
@@ -710,40 +978,14 @@ export default function PdfQuestionGeneratorPage() {
                 setAdminActiveTab('sections');
                 setShowAdminModal(true);
               }}
-              className="inline-flex items-center px-3 py-1.5 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition"
-              title="শ্রেণিভিত্তিক বিষয় ও মানবন্টন সেটআপ"
+              className="inline-flex items-center px-3 py-1.5 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition shadow-2xs"
+              title="শ্রেণিভিত্তিক বিষয় ও মানবন্টন পরিচালনা (শুধুমাত্র আপনার ব্রাউজারে সংরক্ষিত)"
             >
               <Settings2 className="w-3.5 h-3.5 mr-1.5 text-indigo-600" />
-              মানবন্টন ও বিষয় অ্যাডমিন
-            </button>
-
-            <button
-              onClick={() => setShowKeyInput(!showKeyInput)}
-              className="inline-flex items-center px-2.5 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
-              title="API Key Configuration"
-            >
-              <Key className="w-3.5 h-3.5 mr-1 text-slate-500" />
-              {showKeyInput ? 'Hide Key' : 'API Key'}
+              মানবন্টন ও বিষয় সেটিংস
             </button>
           </div>
         </div>
-
-        {showKeyInput && (
-          <div className="bg-amber-50 border-t border-amber-200 px-4 py-2 text-xs">
-            <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-              <span className="text-amber-800 font-medium">
-                টিপস: .env.local ফাইলে GEMINI_API_KEY সেট করা আছে অথবা নিচে পেস্ট করতে পারেন:
-              </span>
-              <input
-                type="password"
-                placeholder="Paste Gemini API Key"
-                value={userApiKey}
-                onChange={(e) => setUserApiKey(e.target.value)}
-                className="text-xs px-2.5 py-1 border border-amber-300 rounded bg-white w-full sm:w-72 focus:outline-none focus:ring-1 focus:ring-amber-500"
-              />
-            </div>
-          </div>
-        )}
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
@@ -754,12 +996,9 @@ export default function PdfQuestionGeneratorPage() {
             
             {/* Step 1: Exam Header & Layout Settings */}
             <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-6 space-y-4">
-              <h2 className="text-base font-bold text-slate-900 flex items-center justify-between">
-                <span className="flex items-center">
-                  <GraduationCap className="w-5 h-5 mr-2 text-indigo-600" />
-                  ১. হেডিং ও তথ্যসমূহ
-                </span>
-                <span className="text-xs bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-full font-bold">কালপুরুষ</span>
+              <h2 className="text-base font-bold text-slate-900 flex items-center">
+                <GraduationCap className="w-5 h-5 mr-2 text-indigo-600" />
+                ১. হেডিং ও তথ্যসমূহ
               </h2>
 
               <div>
@@ -795,23 +1034,10 @@ export default function PdfQuestionGeneratorPage() {
                 />
               </div>
 
-              {/* Class & Class-specific Subject Dropdowns */}
+              {/* Class & Subject Dropdowns */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="block text-sm font-semibold text-slate-700">শ্রেণি</label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminActiveTab('classes');
-                        setShowAdminModal(true);
-                      }}
-                      className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 underline"
-                      title="নতুন শ্রেণি যোগ / এডিট করুন"
-                    >
-                      + শ্রেণি
-                    </button>
-                  </div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">শ্রেণি</label>
                   <select
                     value={selectedClass}
                     onChange={(e) => setSelectedClass(e.target.value)}
@@ -824,21 +1050,7 @@ export default function PdfQuestionGeneratorPage() {
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="block text-sm font-semibold text-slate-700">বিষয় ({selectedClass})</label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminClass(selectedClass);
-                        setAdminActiveTab('subjects');
-                        setShowAdminModal(true);
-                      }}
-                      className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 underline"
-                      title="এই শ্রেণির বিষয় যোগ / এডিট করুন"
-                    >
-                      + বিষয় এডিট
-                    </button>
-                  </div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1">বিষয় ({selectedClass})</label>
                   <select
                     value={selectedSubject}
                     onChange={(e) => setSelectedSubject(e.target.value)}
@@ -874,105 +1086,312 @@ export default function PdfQuestionGeneratorPage() {
                 </div>
               </div>
 
-              {/* Persistent PDF Textbook Storage & Upload Area */}
-              <div className="pt-1">
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-sm font-semibold text-slate-700">
-                    পাঠ্যবই ({selectedClass} শ্রেণি - {selectedSubject})
+              {/* Multi-Source Selection Area */}
+              <div className="pt-1 border-t border-slate-100 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-800">
+                    প্রশ্ন তৈরির সোর্স নির্বাচন ({selectedClass} শ্রেণি - {selectedSubject})
                   </label>
-                  {storedBookInfo && (
-                    <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md flex items-center">
-                      <Check className="w-3 h-3 mr-0.5" /> সংরক্ষিত বই সক্রিয়
-                    </span>
-                  )}
+                  <Link
+                    href="/admin"
+                    className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 underline flex items-center"
+                    title="নতুন সোর্স ফাইল আপলোড করতে অ্যাডমিনে যান"
+                  >
+                    + নতুন সোর্স যোগ
+                  </Link>
                 </div>
 
-                {isLoadingBook ? (
+                {isLoadingSources ? (
                   <div className="p-4 border rounded-xl bg-slate-50 flex items-center justify-center text-xs text-slate-500">
                     <Loader2 className="w-4 h-4 mr-2 animate-spin text-indigo-600" />
-                    সংরক্ষিত বই চেক করা হচ্ছে...
+                    সংরক্ষিত সোর্স চেক করা হচ্ছে...
                   </div>
-                ) : storedBookInfo ? (
-                  /* Saved PDF Found Card */
-                  <div className="p-3 bg-emerald-50/70 border border-emerald-300 rounded-xl space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center space-x-2 overflow-hidden">
-                        <div className="p-2 bg-emerald-600 text-white rounded-lg flex-shrink-0">
-                          <FileText className="w-4 h-4" />
-                        </div>
-                        <div className="overflow-hidden">
-                          <p className="text-xs font-bold text-emerald-950 truncate" title={storedBookInfo.name}>
-                            {storedBookInfo.name}
-                          </p>
-                          <p className="text-[11px] text-emerald-700 font-medium">
-                            সাইজ: {formatBytes(storedBookInfo.size)} • স্থায়ী সংরক্ষিত
-                          </p>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={handleDeleteCurrentBook}
-                        className="p-1 text-slate-400 hover:text-red-600 hover:bg-white rounded transition"
-                        title="সংরক্ষিত বই মুছে ফেলুন"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-
-                    <div className="pt-1 border-t border-emerald-200/60 flex items-center justify-between">
-                      <span className="text-[11px] text-emerald-800 font-semibold">
-                        প্রতিবার আপলোড করা লাগবে না
-                      </span>
-                      <label className="cursor-pointer text-[11px] font-bold text-indigo-700 hover:text-indigo-900 bg-white px-2 py-1 rounded border border-indigo-200 shadow-2xs">
-                        <span>🔄 বই পরিবর্তন করুন</span>
-                        <input type="file" accept="application/pdf" onChange={handleFileChange} className="sr-only" />
-                      </label>
-                    </div>
+                ) : availableSources.length === 0 ? (
+                  /* No sources found */
+                  <div className="p-4 bg-amber-50/70 border border-amber-200 rounded-xl space-y-2 text-center">
+                    <p className="text-xs font-bold text-amber-900">
+                      {selectedClass} শ্রেণির {selectedSubject} বিষয়ের কোনো সোর্স পাওয়া যায়নি
+                    </p>
+                    <p className="text-[11px] text-amber-700">
+                      প্রশ্নপত্র তৈরি করতে প্রথমে অ্যাডমিন পেজ থেকে পিডিএফ, ছবি বা নোট আপলোড করুন।
+                    </p>
+                    <Link
+                      href="/admin"
+                      className="inline-flex items-center px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+                    >
+                      <Plus className="w-3.5 h-3.5 mr-1" />
+                      অ্যাডমিন থেকে সোর্স যোগ করুন
+                    </Link>
                   </div>
                 ) : (
-                  /* No Saved PDF - Upload Dropzone */
-                  <div className="mt-1 flex justify-center px-4 pt-4 pb-4 border-2 border-slate-300 border-dashed rounded-xl hover:border-indigo-400 transition-colors bg-slate-50">
-                    <div className="space-y-1.5 text-center">
-                      <UploadCloud className="mx-auto h-6 w-6 text-indigo-500" />
-                      <div className="flex text-sm text-slate-600 justify-center">
-                        <label className="relative cursor-pointer font-semibold text-indigo-600 hover:text-indigo-500">
-                          <span className="truncate max-w-[220px] inline-block">
-                            {selectedFile ? selectedFile.name : 'পাঠ্যবইয়ের PDF আপলোড করুন'}
-                          </span>
-                          <input type="file" accept="application/pdf" onChange={handleFileChange} className="sr-only" />
-                        </label>
-                      </div>
-                      <p className="text-[11px] text-slate-400">
-                        একবার আপলোড করলেই এই বিষয়টির জন্য স্থায়ী সেভ থাকবে
-                      </p>
-                    </div>
+                  /* List of sources with checkboxes and page range inputs */
+                  <div className="space-y-2 max-h-60 overflow-y-auto pr-0.5">
+                    {availableSources.map((src) => {
+                      const cfg = selectedSourceConfigs[src.id] || { selected: false, startPage: 1, endPage: 1 };
+
+                      return (
+                        <div
+                          key={src.id}
+                          className={`p-2.5 rounded-xl border transition space-y-2 ${
+                            cfg.selected
+                              ? 'bg-indigo-50/50 border-indigo-200 shadow-2xs'
+                              : 'bg-slate-50 border-slate-200 opacity-60'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <label className="flex items-start space-x-2 cursor-pointer flex-1 overflow-hidden">
+                              <input
+                                type="checkbox"
+                                checked={cfg.selected}
+                                onChange={(e) => {
+                                  setSelectedSourceConfigs((prev) => ({
+                                    ...prev,
+                                    [src.id]: {
+                                      ...cfg,
+                                      selected: e.target.checked,
+                                    },
+                                  }));
+                                }}
+                                className="mt-0.5 h-4 w-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 flex-shrink-0"
+                              />
+                              <div className="overflow-hidden">
+                                <div className="flex items-center space-x-1.5">
+                                  <span
+                                    className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                                      src.type === 'pdf'
+                                        ? 'bg-rose-100 text-rose-700'
+                                        : src.type === 'image'
+                                        ? 'bg-emerald-100 text-emerald-700'
+                                        : 'bg-amber-100 text-amber-800'
+                                    }`}
+                                  >
+                                    {src.type === 'pdf' ? 'PDF' : src.type === 'image' ? 'ছবি' : 'নোট'}
+                                  </span>
+                                  <span className="text-xs font-bold text-slate-900 truncate" title={src.title}>
+                                    {src.title}
+                                  </span>
+                                </div>
+                                <p className="text-[10px] text-slate-500 mt-0.5">
+                                  {src.type === 'pdf' && `মোট পৃষ্ঠা: ${src.pageCount || 1} • `}
+                                  {formatBytes(src.size)}
+                                </p>
+                              </div>
+                            </label>
+                          </div>
+
+                          {/* PDF Options (Chapters vs Custom Page Range) */}
+                          {src.type === 'pdf' && cfg.selected && (
+                            <div className="pt-2 border-t border-indigo-100/80 space-y-2">
+                              {Array.isArray(src.chapters) && src.chapters.length > 0 ? (
+                                <div className="space-y-1.5">
+                                  {/* Mode Switcher / Header */}
+                                  <div className="flex items-center justify-between text-[11px] font-bold text-indigo-950">
+                                    <span className="flex items-center">
+                                      <BookOpen className="w-3.5 h-3.5 mr-1 text-indigo-600" />
+                                      {cfg.mode === 'chapters'
+                                        ? `অধ্যায় নির্বাচন (${(cfg.selectedChapterIds || []).length}/${src.chapters.length})`
+                                        : 'কাস্টম পৃষ্ঠা নির্বাচন'}
+                                    </span>
+
+                                    <div className="flex items-center space-x-1.5 text-[10px]">
+                                      {cfg.mode === 'chapters' ? (
+                                        <>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setSelectedSourceConfigs((prev) => ({
+                                                ...prev,
+                                                [src.id]: {
+                                                  ...cfg,
+                                                  selectedChapterIds: src.chapters.map((c) => c.id),
+                                                },
+                                              }));
+                                            }}
+                                            className="text-indigo-600 font-bold hover:underline"
+                                          >
+                                            সব
+                                          </button>
+                                          <span className="text-slate-300">|</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setSelectedSourceConfigs((prev) => ({
+                                                ...prev,
+                                                [src.id]: {
+                                                  ...cfg,
+                                                  selectedChapterIds: [],
+                                                },
+                                              }));
+                                            }}
+                                            className="text-slate-500 hover:text-slate-800"
+                                          >
+                                            মুছুন
+                                          </button>
+                                          <span className="text-slate-300">|</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setSelectedSourceConfigs((prev) => ({
+                                                ...prev,
+                                                [src.id]: { ...cfg, mode: 'pages' },
+                                              }));
+                                            }}
+                                            className="text-slate-500 hover:text-indigo-600 underline"
+                                            title="পৃষ্ঠা নম্বর দিয়ে সিলেক্ট করুন"
+                                          >
+                                            পৃষ্ঠা রেঞ্জ
+                                          </button>
+                                        </>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setSelectedSourceConfigs((prev) => ({
+                                              ...prev,
+                                              [src.id]: { ...cfg, mode: 'chapters' },
+                                            }));
+                                          }}
+                                          className="text-indigo-600 font-bold hover:underline"
+                                        >
+                                          অধ্যায় তালিকা দেখুন
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Chapters Mode Checklist */}
+                                  {cfg.mode === 'chapters' && (
+                                    <div className="space-y-1 max-h-44 overflow-y-auto pr-0.5 bg-white/80 p-1.5 rounded-xl border border-indigo-100">
+                                      {src.chapters.map((chap) => {
+                                        const isChapChecked = (cfg.selectedChapterIds || []).includes(chap.id);
+                                        return (
+                                          <label
+                                            key={chap.id}
+                                            className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer transition ${
+                                              isChapChecked
+                                                ? 'bg-indigo-50 border-indigo-300 text-indigo-950 font-bold shadow-2xs'
+                                                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 font-medium'
+                                            }`}
+                                          >
+                                            <div className="flex items-center space-x-2 overflow-hidden flex-1">
+                                              <input
+                                                type="checkbox"
+                                                checked={isChapChecked}
+                                                onChange={(e) => {
+                                                  const currentIds = cfg.selectedChapterIds || [];
+                                                  const newIds = e.target.checked
+                                                    ? [...currentIds, chap.id]
+                                                    : currentIds.filter((id) => id !== chap.id);
+                                                  setSelectedSourceConfigs((prev) => ({
+                                                    ...prev,
+                                                    [src.id]: {
+                                                      ...cfg,
+                                                      selectedChapterIds: newIds,
+                                                    },
+                                                  }));
+                                                }}
+                                                className="h-3.5 w-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                                              />
+                                              <span className="truncate">{chap.title}</span>
+                                            </div>
+                                            <span className="text-[10px] text-indigo-700 bg-indigo-100/80 px-1.5 py-0.5 rounded ml-2 flex-shrink-0 font-semibold">
+                                              পৃ: {chap.startPage}-{chap.endPage}
+                                            </span>
+                                          </label>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+
+                                  {/* Custom Page Range Mode inside Chaptered PDF */}
+                                  {cfg.mode === 'pages' && (
+                                    <div className="flex items-center justify-between text-xs gap-2 bg-white p-2 rounded-lg border border-slate-200">
+                                      <span className="text-[11px] font-semibold text-slate-700">পৃষ্ঠা রেঞ্জ:</span>
+                                      <div className="flex items-center space-x-1.5">
+                                        <input
+                                          type="number"
+                                          min="1"
+                                          max={src.pageCount || 999}
+                                          value={cfg.startPage || 1}
+                                          onChange={(e) => {
+                                            const val = Math.max(1, parseInt(e.target.value) || 1);
+                                            setSelectedSourceConfigs((prev) => ({
+                                              ...prev,
+                                              [src.id]: { ...cfg, startPage: val },
+                                            }));
+                                          }}
+                                          className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold"
+                                        />
+                                        <span className="text-slate-400">থেকে</span>
+                                        <input
+                                          type="number"
+                                          min={cfg.startPage || 1}
+                                          max={src.pageCount || 999}
+                                          value={cfg.endPage || 1}
+                                          onChange={(e) => {
+                                            const val = Math.max(cfg.startPage || 1, parseInt(e.target.value) || 1);
+                                            setSelectedSourceConfigs((prev) => ({
+                                              ...prev,
+                                              [src.id]: { ...cfg, endPage: val },
+                                            }));
+                                          }}
+                                          className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold"
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                /* No chapters defined yet - show standard page inputs + prompt to add chapters in Admin */
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center justify-between text-xs gap-2">
+                                    <span className="text-[11px] font-semibold text-indigo-900">পৃষ্ঠা নির্বাচন:</span>
+                                    <div className="flex items-center space-x-1.5">
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        max={src.pageCount || 999}
+                                        value={cfg.startPage || 1}
+                                        onChange={(e) => {
+                                          const val = Math.max(1, parseInt(e.target.value) || 1);
+                                          setSelectedSourceConfigs((prev) => ({
+                                            ...prev,
+                                            [src.id]: { ...cfg, startPage: val },
+                                          }));
+                                        }}
+                                        className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold"
+                                      />
+                                      <span className="text-slate-400">থেকে</span>
+                                      <input
+                                        type="number"
+                                        min={cfg.startPage || 1}
+                                        max={src.pageCount || 999}
+                                        value={cfg.endPage || 1}
+                                        onChange={(e) => {
+                                          const val = Math.max(cfg.startPage || 1, parseInt(e.target.value) || 1);
+                                          setSelectedSourceConfigs((prev) => ({
+                                            ...prev,
+                                            [src.id]: { ...cfg, endPage: val },
+                                          }));
+                                        }}
+                                        className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold"
+                                      />
+                                    </div>
+                                  </div>
+                                  <p className="text-[10px] text-slate-400">
+                                    <Link href="/admin" className="text-indigo-600 hover:underline font-bold">
+                                      + অ্যাডমিন থেকে অধ্যায়সমূহ সেট করুন
+                                    </Link>
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
-              </div>
-
-              {/* Page Range Inputs */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-semibold text-slate-700 mb-1">শুরুর পৃষ্ঠা</label>
-                  <input 
-                    type="number" 
-                    min="1"
-                    value={startPage}
-                    onChange={(e) => setStartPage(Math.max(1, parseInt(e.target.value) || 1))}
-                    className="w-full text-base px-3.5 py-2 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none font-semibold"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-slate-700 mb-1">শেষ পৃষ্ঠা</label>
-                  <input 
-                    type="number" 
-                    min="1"
-                    value={endPage}
-                    onChange={(e) => setEndPage(Math.max(1, parseInt(e.target.value) || 1))}
-                    className="w-full text-base px-3.5 py-2 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none font-semibold"
-                  />
-                </div>
               </div>
             </div>
 
@@ -1113,36 +1532,67 @@ export default function PdfQuestionGeneratorPage() {
               </div>
 
               {/* Generate Button */}
-              <button
-                onClick={handleGenerateQuestions}
-                disabled={isProcessing || !selectedFile}
-                className={`w-full mt-4 flex items-center justify-center py-3 px-4 rounded-xl text-sm font-bold text-white shadow-xs transition-all ${
-                  isProcessing || !selectedFile
-                    ? 'bg-slate-400 cursor-not-allowed'
-                    : 'bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99]'
-                }`}
-              >
-                {isProcessing ? (
-                  <>
-                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                    প্রশ্ন তৈরি হচ্ছে...
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="w-5 h-5 mr-2" />
-                    প্রশ্নপত্র তৈরি করুন
-                  </>
-                )}
-              </button>
+              {(() => {
+                const hasSelectedSources = Object.values(selectedSourceConfigs).some((c) => c.selected);
+                return (
+                  <button
+                    onClick={handleGenerateQuestions}
+                    disabled={isProcessing || !hasSelectedSources}
+                    className={`w-full mt-4 flex items-center justify-center py-3 px-4 rounded-xl text-sm font-bold text-white shadow-xs transition-all ${
+                      isProcessing || !hasSelectedSources
+                        ? 'bg-slate-400 cursor-not-allowed'
+                        : 'bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99]'
+                    }`}
+                  >
+                    {isProcessing ? (
+                      <>
+                        <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                        প্রশ্ন তৈরি হচ্ছে...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-5 h-5 mr-2" />
+                        প্রশ্নপত্র তৈরি করুন
+                      </>
+                    )}
+                  </button>
+                );
+              })()}
 
               {statusMessage && (
                 <p className="text-sm text-center text-indigo-600 font-semibold animate-pulse">{statusMessage}</p>
               )}
 
               {errorMessage && (
-                <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl flex items-start text-sm text-red-700">
-                  <AlertCircle className="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" />
-                  <span>{errorMessage}</span>
+                <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl space-y-2.5 text-sm text-rose-800">
+                  <div className="flex items-start">
+                    <AlertCircle className="w-5 h-5 mr-2 flex-shrink-0 mt-0.5 text-rose-600" />
+                    <span className="font-medium leading-relaxed">{errorMessage}</span>
+                  </div>
+                  {(errorMessage.includes('API Key') || errorMessage.includes('401') || errorMessage.includes('UNAUTHENTICATED') || errorMessage.includes('credentials')) && (
+                    <div className="pt-2 border-t border-rose-200 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setApiKeyInput(userApiKey);
+                          setShowApiKeyModal(true);
+                        }}
+                        className="inline-flex items-center px-3 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 active:scale-95 rounded-lg transition shadow-2xs"
+                      >
+                        <KeyRound className="w-3.5 h-3.5 mr-1.5" />
+                        এখানে API Key বসান
+                      </button>
+                      <a
+                        href="https://aistudio.google.com/app/apikey"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center text-xs font-bold text-rose-700 hover:underline"
+                      >
+                        ফ্রি API Key তৈরি করুন (Google AI Studio)
+                        <ExternalLink className="w-3 h-3 ml-1" />
+                      </a>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1212,9 +1662,7 @@ export default function PdfQuestionGeneratorPage() {
                       মোট পূর্ণমান: {toBengaliNumerals(fullMarks || totalCalculatedMarks)}
                     </span>
                     <span>•</span>
-                    <span className="text-indigo-700 font-semibold">ফন্ট: কালপুরুষ</span>
-                    <span>•</span>
-                    <span>A4 Landscape ২-কলাম</span>
+                    <span>A4 Landscape ২-কলাম প্রশ্নপত্র</span>
                   </div>
                   {previewMode === 'answer' && (
                     <span className="text-emerald-700 font-bold bg-emerald-100/80 px-2.5 py-0.5 rounded-full">
@@ -1231,7 +1679,7 @@ export default function PdfQuestionGeneratorPage() {
                     <div className="w-full bg-white p-6 sm:p-8 rounded-xl border border-slate-300 shadow-xs space-y-4">
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 sm:gap-8 divide-y md:divide-y-0 md:divide-x divide-slate-200">
                         
-                        {/* Left Column (Header + Section 1 + Section 2) */}
+                        {/* Left Column (Header + Sections 1 to 6) */}
                         <div className="space-y-4 pr-0 md:pr-4">
                           {/* Header Box on Left Column */}
                           <div className="text-center space-y-1 pb-3">
@@ -1249,168 +1697,14 @@ export default function PdfQuestionGeneratorPage() {
                           </div>
 
                           {/* Left Sections */}
-                          {leftColSections.map((section, sIndex) => {
-                            const qCount = section.questions?.length || 0;
-                            const markPerQ = section.marksPerQuestion || 1;
-                            const totalSecMarks = qCount * markPerQ;
-                            const isMcq = section.id.includes('mcq') || section.title.includes('সঠিক উত্তর') || (section.questions[0]?.options?.length > 0);
-
-                            return (
-                              <div key={section.id || sIndex} className="space-y-2 pt-2">
-                                <div className="flex items-center justify-between border-b border-slate-200 pb-1">
-                                  <span className="text-sm font-bold text-slate-900">
-                                    {toBengaliNumerals(sIndex + 1)}। {section.title}
-                                  </span>
-                                  <span className="text-sm font-bold text-slate-800">
-                                    {toBengaliNumerals(totalSecMarks, true)}
-                                  </span>
-                                </div>
-
-                                <div className="space-y-2">
-                                  {section.questions.map((q, qIndex) => {
-                                    const subPrefix = isMcq ? `${toBengaliNumerals(qIndex + 1)}) ` : `${bnLetters[qIndex] || `(${qIndex + 1})`} `;
-                                    return (
-                                      <div key={q.id || qIndex} className="space-y-1 text-sm">
-                                        <div className="flex items-start justify-between gap-2">
-                                          <span className="font-bold text-slate-700 flex-shrink-0">{subPrefix}</span>
-                                          <textarea
-                                            value={q.questionText}
-                                            onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
-                                            rows={1}
-                                            className="w-full text-sm p-1.5 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500"
-                                          />
-                                          <button
-                                            onClick={() => handleDeleteQuestion(sIndex, qIndex)}
-                                            className="text-slate-300 hover:text-red-500 p-0.5 flex-shrink-0"
-                                          >
-                                            <Trash2 className="w-3.5 h-3.5" />
-                                          </button>
-                                        </div>
-
-                                        {/* 2 Options for MCQs */}
-                                        {q.options && q.options.length > 0 && (
-                                          <div className="grid grid-cols-2 gap-2 pl-4">
-                                            {q.options.slice(0, 2).map((opt, optIndex) => (
-                                              <div key={optIndex} className="flex items-center space-x-1.5">
-                                                <span className="text-xs font-bold text-slate-600">
-                                                  {bnOptPrefixes[optIndex] || `${optIndex + 1}.`}
-                                                </span>
-                                                <input
-                                                  type="text"
-                                                  value={opt}
-                                                  onChange={(e) => handleOptionChange(sIndex, qIndex, optIndex, e.target.value)}
-                                                  className="w-full text-xs px-2 py-1 border border-slate-200 rounded-lg"
-                                                />
-                                              </div>
-                                            ))}
-                                          </div>
-                                        )}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-
-                                <button
-                                  onClick={() => handleAddQuestion(sIndex)}
-                                  className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center pt-1"
-                                >
-                                  <Plus className="w-3.5 h-3.5 mr-0.5" /> প্রশ্ন যোগ
-                                </button>
-                              </div>
-                            );
-                          })}
+                          {leftColSections.map((section, sIndex) => renderQuestionPaperSection(section, sIndex))}
                         </div>
 
-                        {/* Right Column */}
+                        {/* Right Column (Sections 7 to 10) */}
                         <div className="space-y-4 pt-4 md:pt-0 pl-0 md:pl-4">
                           {rightColSections.map((section, rIndex) => {
                             const sIndex = previewSplitIndex + rIndex;
-                            const qCount = section.questions?.length || 0;
-                            const markPerQ = section.marksPerQuestion || 1;
-                            const totalSecMarks = qCount * markPerQ;
-                            const isMatchSec = section.id.includes('match') || section.title.includes('মিল') || section.title.toLowerCase().includes('match');
-
-                            return (
-                              <div key={section.id || sIndex} className="space-y-2">
-                                <div className="flex items-center justify-between border-b border-slate-200 pb-1">
-                                  <span className="text-sm font-bold text-slate-900">
-                                    {toBengaliNumerals(sIndex + 1)}। {section.title}
-                                  </span>
-                                  <span className="text-sm font-bold text-slate-800">
-                                    {toBengaliNumerals(totalSecMarks, true)}
-                                  </span>
-                                </div>
-
-                                {isMatchSec && section.questions.length > 0 ? (
-                                  <div className="border border-slate-400 rounded-lg overflow-hidden text-xs">
-                                    <div className="grid grid-cols-2 bg-slate-100 p-1.5 font-bold text-slate-800 border-b border-slate-400 text-center">
-                                      <div className="border-r border-slate-400">বামপাশ</div>
-                                      <div>ডানপাশ</div>
-                                    </div>
-                                    <div className="divide-y divide-slate-300">
-                                      {section.questions.map((q, qIndex) => (
-                                        <div key={q.id || qIndex} className="grid grid-cols-2 text-xs">
-                                          <div className="p-1.5 border-r border-slate-300 flex items-center space-x-1.5">
-                                            <span className="font-bold text-slate-600">{bnLetters[qIndex] || `(${qIndex + 1})`}</span>
-                                            <input
-                                              type="text"
-                                              value={q.questionText}
-                                              onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
-                                              className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-indigo-500"
-                                            />
-                                          </div>
-                                          <div className="p-1.5 flex items-center space-x-1.5">
-                                            <input
-                                              type="text"
-                                              value={q.answer}
-                                              onChange={(e) => handleAnswerTextChange(sIndex, qIndex, e.target.value)}
-                                              className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-emerald-500 text-emerald-900 font-medium"
-                                            />
-                                            <button
-                                              onClick={() => handleDeleteQuestion(sIndex, qIndex)}
-                                              className="text-slate-300 hover:text-red-500 p-0.5"
-                                            >
-                                              <Trash2 className="w-3.5 h-3.5" />
-                                            </button>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="space-y-2">
-                                    {section.questions.map((q, qIndex) => (
-                                      <div key={q.id || qIndex} className="space-y-1 text-sm">
-                                        <div className="flex items-start justify-between gap-2">
-                                          <span className="font-bold text-slate-700 flex-shrink-0">
-                                            {bnLetters[qIndex] || `(${qIndex + 1})`}
-                                          </span>
-                                          <textarea
-                                            value={q.questionText}
-                                            onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
-                                            rows={1}
-                                            className="w-full text-sm p-1.5 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500"
-                                          />
-                                          <button
-                                            onClick={() => handleDeleteQuestion(sIndex, qIndex)}
-                                            className="text-slate-300 hover:text-red-500 p-0.5 flex-shrink-0"
-                                          >
-                                            <Trash2 className="w-3.5 h-3.5" />
-                                          </button>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-
-                                <button
-                                  onClick={() => handleAddQuestion(sIndex)}
-                                  className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center pt-1"
-                                >
-                                  <Plus className="w-3.5 h-3.5 mr-0.5" /> প্রশ্ন যোগ
-                                </button>
-                              </div>
-                            );
+                            return renderQuestionPaperSection(section, sIndex);
                           })}
                         </div>
 
@@ -1430,14 +1724,22 @@ export default function PdfQuestionGeneratorPage() {
                       {/* Answer Sections */}
                       <div className="space-y-6">
                         {previewSections.map((section, sIndex) => {
-                          const isMatchSec = section.id.includes('match') || section.title.includes('মিল');
-                          const isMcq = section.id.includes('mcq') || section.title.includes('সঠিক উত্তর') || (section.questions?.[0]?.options?.length > 0);
-                          const isFib = section.id.includes('fib') || section.title.includes('শূন্যস্থান');
-                          const isTf = section.id.includes('tf') || section.title.includes('সত্য');
-                          const isOral = section.id.includes('oral') || section.title.includes('মৌখিক');
-                          const isShortQuestion = section.id.includes('short') || section.title.includes('সংক্ষেপ') || section.title.includes('সংক্ষিপ্ত') || section.title.includes('ছোট');
-                          const isLongQuestion = section.id.includes('long') || section.title.includes('রচনামূলক') || section.title.includes('বর্ণনামূলক') || section.title.includes('কাঠামোবদ্ধ') || section.title.includes('নিচের প্রশ্ন') || section.title.includes('প্রশ্নের উত্তর');
-                          const isQuestionWithAi = isShortQuestion || isLongQuestion || (!isMcq && !isMatchSec && !isFib && !isTf && !isOral);
+                          const isMatchSec = section.id?.includes('match') || section.title?.includes('মিল');
+                          const isMcq = section.id?.includes('mcq') || section.title?.includes('সঠিক উত্তর') || (section.questions?.[0]?.options?.length > 0);
+                          const isFib = section.id?.includes('fib') || section.title?.includes('শূন্যস্থান');
+                          const isTf = section.id?.includes('tf') || section.title?.includes('সত্য');
+                          const isOral = section.id?.includes('oral') || section.title?.includes('মৌখিক');
+                          
+                          const isVocab = section.id?.includes('vocab') || section.title?.includes('শব্দার্থ');
+                          const isSentence = section.id?.includes('sentence') || section.title?.includes('বাক্য গঠন');
+                          const isPoem = section.id?.includes('poem') || section.title?.includes('কবিতা');
+                          const isPunctuation = section.id?.includes('punctuation') || section.title?.includes('বিরাম');
+                          const isConjunct = section.id?.includes('conjunct') || section.title?.includes('যুক্তবর্ণ');
+                          const isSinglePrompt = isPoem || isPunctuation || ((section.id?.includes('theme') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('রচনা') || section.title?.includes('বর্ণনামূলক')) && section.questions?.length <= 1);
+                          
+                          const isShortQuestion = section.id?.includes('short') || section.title?.includes('সংক্ষেপ') || section.title?.includes('সংক্ষিপ্ত') || section.title?.includes('ছোট');
+                          const isLongQuestion = section.id?.includes('long') || section.title?.includes('রচনামূলক') || section.title?.includes('বর্ণনামূলক') || section.title?.includes('কাঠামোবদ্ধ') || section.title?.includes('নিচের প্রশ্ন') || section.title?.includes('প্রশ্নের উত্তর') || section.title?.includes('মূলভাব');
+                          const isQuestionWithAi = isShortQuestion || isLongQuestion || isPunctuation || (!isMcq && !isMatchSec && !isFib && !isTf && !isOral && !isPoem);
 
                           if (isOral) return null;
 
@@ -1448,163 +1750,192 @@ export default function PdfQuestionGeneratorPage() {
                                   {toBengaliNumerals(sIndex + 1)}। {section.title}
                                 </span>
                                 <span className="text-xs font-bold text-slate-600 bg-white px-2 py-0.5 rounded border">
-                                  {section.questions?.length || 0}টি প্রশ্ন
+                                  {isPoem ? 'মুখস্থ' : `${section.questions?.length || 0}টি উত্তর`}
                                 </span>
                               </div>
 
-                              {/* Section Question & Answers */}
-                              <div className="space-y-4">
-                                {section.questions.map((q, qIndex) => {
-                                  const itemKey = `${sIndex}_${qIndex}`;
-                                  const isCurrentlyRefining = refiningKey === itemKey;
-                                  const isCustomPromptOpen = customPromptOpenKey === itemKey;
-                                  const subPrefix = isMcq ? `${toBengaliNumerals(qIndex + 1)}) ` : `${bnLetters[qIndex] || `(${qIndex + 1})`} `;
+                              {/* Case 1: Poem - No answer key needed as requested */}
+                              {isPoem ? (
+                                <div className="p-3 bg-white rounded-xl border border-slate-200 text-xs text-slate-500 italic">
+                                  📖 কবিতার উত্তর দেওয়ার প্রয়োজন নেই (শিক্ষার্থীরা পাঠ্যবই থেকে মুখস্থ লিখবে)।
+                                </div>
+                              ) : (
+                                /* Other Section Answers */
+                                <div className="space-y-3">
+                                  {section.questions?.map((q, qIndex) => {
+                                    const itemKey = `${sIndex}_${qIndex}`;
+                                    const isCurrentlyRefining = refiningKey === itemKey;
+                                    const isCustomPromptOpen = customPromptOpenKey === itemKey;
+                                    
+                                    // Prefix logic: No ক, খ for vocab, sentence, conjunct, single-prompt
+                                    const showSubPrefix = !isVocab && !isSentence && !isConjunct && !isSinglePrompt;
+                                    const subPrefix = isMcq 
+                                      ? `${toBengaliNumerals(qIndex + 1)}) ` 
+                                      : showSubPrefix ? `${bnLetters[qIndex] || `(${qIndex + 1})`} ` : '';
 
-                                  return (
-                                    <div key={q.id || qIndex} className="p-3 bg-white rounded-xl border border-slate-200 shadow-2xs space-y-2">
-                                      {/* Question Text Display */}
-                                      <div className="flex items-start justify-between text-sm">
-                                        <div className="flex items-start space-x-1.5">
-                                          <span className="font-bold text-slate-800">{subPrefix}</span>
-                                          <span className="font-medium text-slate-900">{q.questionText}</span>
-                                        </div>
-                                      </div>
-
-                                      {/* MCQ Options Display with highlight */}
-                                      {isMcq && q.options && q.options.length > 0 && (
-                                        <div className="grid grid-cols-2 gap-2 pl-4 py-1 text-xs">
-                                          {q.options.map((opt, optIdx) => {
-                                            const isSelectedAns = cleanOptionText(opt) === cleanOptionText(q.answer) || optIdx === 0 && !q.answer;
-                                            return (
-                                              <div 
-                                                key={optIdx} 
-                                                className={`p-1.5 rounded-lg border flex items-center justify-between cursor-pointer ${
-                                                  isSelectedAns ? 'bg-emerald-50 border-emerald-400 text-emerald-900 font-bold' : 'bg-slate-50 border-slate-200 text-slate-700'
-                                                }`}
-                                                onClick={() => handleAnswerTextChange(sIndex, qIndex, cleanOptionText(opt))}
-                                              >
-                                                <span>{bnOptPrefixes[optIdx]} {opt}</span>
-                                                {isSelectedAns && <span className="text-emerald-600 font-bold">✔ সঠিক</span>}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-                                      )}
-
-                                      {/* Answer Input & AI Toolbar (AI Toolbar on Short & Long Questions) */}
-                                      <div className="space-y-2 pt-1 border-t border-slate-100">
-                                        <div className="flex items-start space-x-2">
-                                          <span className="text-xs font-bold text-emerald-700 mt-1.5 flex-shrink-0">উত্তর:</span>
-                                          <textarea
-                                            value={q.answer || ''}
-                                            onChange={(e) => handleAnswerTextChange(sIndex, qIndex, e.target.value)}
-                                            rows={isQuestionWithAi ? (q.answer && q.answer.length > 60 ? 3 : 2) : 1}
-                                            className="w-full text-sm p-2 border border-emerald-300 rounded-lg bg-emerald-50/40 text-emerald-950 font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-none"
-                                            placeholder="সঠিক উত্তর লিখুন..."
-                                          />
+                                    return (
+                                      <div key={q.id || qIndex} className="p-3 bg-white rounded-xl border border-slate-200 shadow-2xs space-y-2">
+                                        {/* Item Title / Prompt */}
+                                        <div className="flex items-start justify-between text-sm">
+                                          <div className="flex items-start space-x-1.5">
+                                            {subPrefix && <span className="font-bold text-slate-800">{subPrefix}</span>}
+                                            <span className="font-medium text-slate-900">
+                                              {isVocab ? (
+                                                <span className="font-bold text-indigo-950">শব্দ: {q.questionText}</span>
+                                              ) : isSentence ? (
+                                                <span className="font-bold text-indigo-950">শব্দ: {q.questionText}</span>
+                                              ) : isConjunct ? (
+                                                <span className="font-bold text-indigo-950">যুক্তবর্ণ: {q.questionText}</span>
+                                              ) : (
+                                                q.questionText
+                                              )}
+                                            </span>
+                                          </div>
                                         </div>
 
-                                        {/* AI Quick Actions Bar for Short Questions & Descriptive Questions */}
-                                        {isQuestionWithAi && (
-                                          <div className="flex flex-wrap items-center justify-between gap-2 pl-8 pt-1">
-                                            <div className="flex flex-wrap items-center gap-1.5">
-                                              <button
-                                                type="button"
-                                                disabled={isCurrentlyRefining}
-                                                onClick={() => handleRefineAnswer(sIndex, qIndex, 'make_longer')}
-                                                className="inline-flex items-center px-2.5 py-1 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition disabled:opacity-50"
-                                                title="উত্তরটিকে আরও বিস্তারিত ও বড় করুন"
-                                              >
-                                                🪄 আরেকটু বড় করুন
-                                              </button>
-
-                                              <button
-                                                type="button"
-                                                disabled={isCurrentlyRefining}
-                                                onClick={() => handleRefineAnswer(sIndex, qIndex, 'make_shorter')}
-                                                className="inline-flex items-center px-2.5 py-1 text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition disabled:opacity-50"
-                                                title="উত্তরটিকে সংক্ষেপে সাজিয়ে দিন"
-                                              >
-                                                ⚡ সংক্ষিপ্ত করুন
-                                              </button>
-
-                                              <button
-                                                type="button"
-                                                disabled={isCurrentlyRefining}
-                                                onClick={() => handleRefineAnswer(sIndex, qIndex, 'simplify')}
-                                                className="inline-flex items-center px-2.5 py-1 text-xs font-bold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition disabled:opacity-50"
-                                                title="উত্তরটি সহজ-সরল ভাষায় লিখুন"
-                                              >
-                                                🌿 সহজ ভাষায়
-                                              </button>
-
-                                              <button
-                                                type="button"
-                                                disabled={isCurrentlyRefining}
-                                                onClick={() => {
-                                                  if (isCustomPromptOpen) {
-                                                    setCustomPromptOpenKey(null);
-                                                  } else {
-                                                    setCustomPromptOpenKey(itemKey);
-                                                    setCustomPromptText('');
-                                                  }
-                                                }}
-                                                className="inline-flex items-center px-2.5 py-1 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition"
-                                                title="নিজের মতো নির্দেশ দিয়ে AI দিয়ে উত্তর সাজান"
-                                              >
-                                                💬 কাস্টম নির্দেশ...
-                                              </button>
-                                            </div>
-
-                                            {isCurrentlyRefining && (
-                                              <div className="flex items-center text-xs font-bold text-indigo-600 animate-pulse">
-                                                <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
-                                                AI উত্তর তৈরি করছে...
-                                              </div>
-                                            )}
+                                        {/* MCQ Options Display with highlight */}
+                                        {isMcq && q.options && q.options.length > 0 && (
+                                          <div className="grid grid-cols-2 gap-2 pl-4 py-1 text-xs">
+                                            {q.options.map((opt, optIdx) => {
+                                              const isSelectedAns = cleanOptionText(opt) === cleanOptionText(q.answer) || (optIdx === 0 && !q.answer);
+                                              return (
+                                                <div 
+                                                  key={optIdx} 
+                                                  className={`p-1.5 rounded-lg border flex items-center justify-between cursor-pointer ${
+                                                    isSelectedAns ? 'bg-emerald-50 border-emerald-400 text-emerald-900 font-bold' : 'bg-slate-50 border-slate-200 text-slate-700'
+                                                  }`}
+                                                  onClick={() => handleAnswerTextChange(sIndex, qIndex, cleanOptionText(opt))}
+                                                >
+                                                  <span>{bnOptPrefixes[optIdx]} {opt}</span>
+                                                  {isSelectedAns && <span className="text-emerald-600 font-bold">✔ সঠিক</span>}
+                                                </div>
+                                              );
+                                            })}
                                           </div>
                                         )}
 
-                                        {/* Inline Custom AI Prompt Input */}
-                                        {isCustomPromptOpen && isQuestionWithAi && (
-                                          <div className="pl-8 pt-2 animate-in fade-in slide-in-from-top-1 duration-150">
-                                            <div className="flex items-center gap-2 bg-indigo-50/70 p-2 rounded-xl border border-indigo-200">
-                                              <input 
-                                                type="text" 
-                                                value={customPromptText}
-                                                onChange={(e) => setCustomPromptText(e.target.value)}
-                                                placeholder="যেমন: ৩টি পয়েন্টে উদাহরণসহ উত্তর দাও..."
-                                                className="w-full text-xs px-3 py-1.5 bg-white border border-indigo-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                                                onKeyDown={(e) => {
-                                                  if (e.key === 'Enter' && customPromptText.trim()) {
-                                                    handleRefineAnswer(sIndex, qIndex, 'custom', customPromptText);
-                                                  }
-                                                }}
-                                              />
-                                              <button
-                                                type="button"
-                                                disabled={isCurrentlyRefining || !customPromptText.trim()}
-                                                onClick={() => handleRefineAnswer(sIndex, qIndex, 'custom', customPromptText)}
-                                                className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-xs transition disabled:opacity-50 flex-shrink-0"
-                                              >
-                                                প্রয়োগ করুন
-                                              </button>
-                                              <button
-                                                type="button"
-                                                onClick={() => setCustomPromptOpenKey(null)}
-                                                className="text-slate-400 hover:text-slate-600 p-1"
-                                              >
-                                                <X className="w-4 h-4" />
-                                              </button>
-                                            </div>
+                                        {/* Answer Input & AI Toolbar */}
+                                        <div className="space-y-2 pt-1 border-t border-slate-100">
+                                          <div className="flex items-start space-x-2">
+                                            <span className="text-xs font-bold text-emerald-700 mt-1.5 flex-shrink-0">
+                                              {isVocab ? 'অর্থ:' : isSentence ? 'বাক্য:' : isConjunct ? 'বিভাজন ও শব্দ:' : 'উত্তর:'}
+                                            </span>
+                                            <textarea
+                                              value={q.answer || ''}
+                                              onChange={(e) => handleAnswerTextChange(sIndex, qIndex, e.target.value)}
+                                              rows={isQuestionWithAi ? (q.answer && q.answer.length > 60 ? 3 : 2) : 1}
+                                              className="w-full text-sm p-2 border border-emerald-300 rounded-lg bg-emerald-50/40 text-emerald-950 font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                                              placeholder={
+                                                isVocab ? 'যেমন: সুবাস' :
+                                                isSentence ? 'যেমন: বাঘ একটি বন্য প্রাণী।' :
+                                                isConjunct ? 'যেমন: ন + ধ (গন্ধ, বান্ধব)' :
+                                                'সঠিক উত্তর লিখুন...'
+                                              }
+                                            />
                                           </div>
-                                        )}
 
+                                          {/* AI Quick Actions Bar for Questions */}
+                                          {isQuestionWithAi && (
+                                            <div className="flex flex-wrap items-center justify-between gap-2 pl-8 pt-1">
+                                              <div className="flex flex-wrap items-center gap-1.5">
+                                                <button
+                                                  type="button"
+                                                  disabled={isCurrentlyRefining}
+                                                  onClick={() => handleRefineAnswer(sIndex, qIndex, 'make_longer')}
+                                                  className="inline-flex items-center px-2.5 py-1 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition disabled:opacity-50"
+                                                  title="উত্তরটিকে আরও বিস্তারিত ও বড় করুন"
+                                                >
+                                                  🪄 আরেকটু বড় করুন
+                                                </button>
+
+                                                <button
+                                                  type="button"
+                                                  disabled={isCurrentlyRefining}
+                                                  onClick={() => handleRefineAnswer(sIndex, qIndex, 'make_shorter')}
+                                                  className="inline-flex items-center px-2.5 py-1 text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition disabled:opacity-50"
+                                                  title="উত্তরটিকে সংক্ষেপে সাজিয়ে দিন"
+                                                >
+                                                  ⚡ সংক্ষিপ্ত করুন
+                                                </button>
+
+                                                <button
+                                                  type="button"
+                                                  disabled={isCurrentlyRefining}
+                                                  onClick={() => handleRefineAnswer(sIndex, qIndex, 'simplify')}
+                                                  className="inline-flex items-center px-2.5 py-1 text-xs font-bold text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition disabled:opacity-50"
+                                                  title="উত্তরটি সহজ-সরল ভাষায় লিখুন"
+                                                >
+                                                  🌿 সহজ ভাষায়
+                                                </button>
+
+                                                <button
+                                                  type="button"
+                                                  disabled={isCurrentlyRefining}
+                                                  onClick={() => {
+                                                    if (isCustomPromptOpen) {
+                                                      setCustomPromptOpenKey(null);
+                                                    } else {
+                                                      setCustomPromptOpenKey(itemKey);
+                                                      setCustomPromptText('');
+                                                    }
+                                                  }}
+                                                  className="inline-flex items-center px-2.5 py-1 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg transition"
+                                                  title="নিজের মতো নির্দেশ দিয়ে AI দিয়ে উত্তর সাজান"
+                                                >
+                                                  💬 কাস্টম নির্দেশ...
+                                                </button>
+                                              </div>
+
+                                              {isCurrentlyRefining && (
+                                                <div className="flex items-center text-xs font-bold text-indigo-600 animate-pulse">
+                                                  <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                                                  AI উত্তর তৈরি করছে...
+                                                </div>
+                                              )}
+                                            </div>
+                                          )}
+
+                                          {/* Inline Custom AI Prompt Input */}
+                                          {isCustomPromptOpen && isQuestionWithAi && (
+                                            <div className="pl-8 pt-2 animate-in fade-in slide-in-from-top-1 duration-150">
+                                              <div className="flex items-center gap-2 bg-indigo-50/70 p-2 rounded-xl border border-indigo-200">
+                                                <input 
+                                                  type="text" 
+                                                  value={customPromptText}
+                                                  onChange={(e) => setCustomPromptText(e.target.value)}
+                                                  placeholder="যেমন: ৩টি পয়েন্টে উদাহরণসহ উত্তর দাও..."
+                                                  className="w-full text-xs px-3 py-1.5 bg-white border border-indigo-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                                  onKeyDown={(e) => {
+                                                    if (e.key === 'Enter' && customPromptText.trim()) {
+                                                      handleRefineAnswer(sIndex, qIndex, 'custom', customPromptText);
+                                                    }
+                                                  }}
+                                                />
+                                                <button
+                                                  type="button"
+                                                  disabled={isCurrentlyRefining || !customPromptText.trim()}
+                                                  onClick={() => handleRefineAnswer(sIndex, qIndex, 'custom', customPromptText)}
+                                                  className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-xs transition disabled:opacity-50 flex-shrink-0"
+                                                >
+                                                  প্রয়োগ করুন
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => setCustomPromptOpenKey(null)}
+                                                  className="text-slate-400 hover:text-slate-600 p-1"
+                                                >
+                                                  <X className="w-4 h-4" />
+                                                </button>
+                                              </div>
+                                            </div>
+                                          )}
+
+                                        </div>
                                       </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
                             </div>
                           );
                         })}
@@ -1622,10 +1953,10 @@ export default function PdfQuestionGeneratorPage() {
                   <FileText className="w-10 h-10" />
                 </div>
                 <h3 className="text-base font-bold text-slate-800">
-                  A4 Landscape ২-কলাম কালপুরুষ ফন্টে প্রশ্নপত্র ও উত্তরমালা তৈরি হবে
+                  A4 Landscape ২-কলাম প্রশ্নপত্র ও উত্তরমালা তৈরি হবে
                 </h3>
                 <p className="text-sm text-slate-500 max-w-lg mt-2 leading-relaxed">
-                  বামপাশে পাঠ্যবইয়ের PDF আপলোড করে পৃষ্ঠা নির্বাচন করুন এবং "প্রশ্নপত্র তৈরি করুন" বাটনে ক্লিক করুন। প্রশ্ন তৈরি হওয়ার পর টগল সুইচে প্রশ্নপত্র ও উত্তরমালার লাইভ এডিটর দেখতে পাবেন।
+                  বামপাশে সংরক্ষিত সোর্স (পিডিএফ, ছবি বা নোট) নির্বাচন করুন এবং "প্রশ্নপত্র তৈরি করুন" বাটনে ক্লিক করুন। প্রশ্ন তৈরি হওয়ার পর টগল সুইচে প্রশ্নপত্র ও উত্তরমালার লাইভ এডিটর দেখতে পাবেন।
                 </p>
               </div>
             )}
@@ -1701,22 +2032,6 @@ export default function PdfQuestionGeneratorPage() {
               >
                 <GraduationCap className="w-4 h-4 text-amber-600" />
                 <span>🎓 শ্রেণি পরিচালনা</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setAdminActiveTab('books');
-                  getAllStoredBooks().then((books) => setAdminStoredBooks(books));
-                }}
-                className={`px-3.5 py-2.5 rounded-t-xl border-t border-x transition flex items-center space-x-1.5 whitespace-nowrap ${
-                  adminActiveTab === 'books'
-                    ? 'bg-white border-slate-200 text-indigo-700 shadow-2xs font-extrabold'
-                    : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-                }`}
-              >
-                <HardDrive className="w-4 h-4 text-purple-600" />
-                <span>📂 সংরক্ষিত বই লাইব্রেরি ({toBengaliNumerals(adminStoredBooks.length)})</span>
               </button>
             </div>
 
@@ -2165,80 +2480,6 @@ export default function PdfQuestionGeneratorPage() {
               </div>
             )}
 
-            {/* ================= TAB 4: SAVED TEXTBOOKS LIBRARY ================= */}
-            {adminActiveTab === 'books' && (
-              <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/60">
-                <div className="flex items-center justify-between pb-1">
-                  <div>
-                    <h4 className="text-sm font-bold text-slate-800">
-                      সংরক্ষিত পাঠ্যবইসমূহ (IndexedDB Storage)
-                    </h4>
-                    <p className="text-xs text-slate-500">
-                      ব্রাউজারে স্থায়ীভাবে সংরক্ষিত বইগুলো যে কোনো সময় প্রশ্ন তৈরিতে সরাসরি ব্যবহার হবে
-                    </p>
-                  </div>
-                  <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-full border border-indigo-200">
-                    মোট বই: {toBengaliNumerals(adminStoredBooks.length)}টি
-                  </span>
-                </div>
-
-                {adminStoredBooks.length === 0 ? (
-                  <div className="p-8 text-center bg-white rounded-xl border border-dashed border-slate-300 text-slate-500 space-y-2">
-                    <HardDrive className="w-8 h-8 mx-auto text-slate-300" />
-                    <p className="text-xs font-bold text-slate-700">এখনও কোনো পাঠ্যবই সংরক্ষিত নেই</p>
-                    <p className="text-[11px] text-slate-400 max-w-sm mx-auto">
-                      মূল পেজে যে কোনো বিষয়ের PDF একবার আপলোড করলেই তা স্বয়ংক্রিয়ভাবে এখানে সংরক্ষিত হয়ে যাবে।
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {adminStoredBooks.map((book) => (
-                      <div key={book.key} className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs space-y-2.5 flex flex-col justify-between">
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-indigo-800 bg-indigo-50 px-2 py-0.5 rounded-md">
-                              {book.className} শ্রেণি • {book.subject}
-                            </span>
-                            <span className="text-[11px] font-bold text-slate-500">
-                              {formatBytes(book.size)}
-                            </span>
-                          </div>
-                          <p className="text-xs font-bold text-slate-800 truncate" title={book.name}>
-                            {book.name}
-                          </p>
-                          <p className="text-[10px] text-slate-400">
-                            সংরক্ষণের তারিখ: {new Date(book.updatedAt).toLocaleDateString('bn-BD')}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedClass(book.className);
-                              setSelectedSubject(book.subject);
-                              setShowAdminModal(false);
-                            }}
-                            className="text-indigo-600 hover:text-indigo-800 font-bold text-[11px]"
-                          >
-                            👉 এই বিষয়ের প্রশ্নপত্র পেজে যান
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleAdminDeleteBook(book.className, book.subject)}
-                            className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition"
-                            title="সংরক্ষিত বই মুছুন"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
           </div>
         </div>
       )}
@@ -2319,6 +2560,95 @@ export default function PdfQuestionGeneratorPage() {
                 >
                   যোগ করুন
                 </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Gemini API Key Settings */}
+      {showApiKeyModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-lg w-full p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2">
+                <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Google Gemini API Key সেটিংস</h3>
+                  <p className="text-xs text-slate-500">প্রশ্নপত্র তৈরির জন্য আপনার নিজস্ব ফ্রি API Key দিন</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowApiKeyModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveApiKey} className="space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">
+                  Gemini API Key
+                </label>
+                <input
+                  type="text"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="AIzaSy..."
+                  className="w-full text-sm font-mono px-3.5 py-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-slate-50 focus:bg-white"
+                />
+                <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
+                  গুগল এআই স্টুডিওর ফ্রি API Key সাধারণত <code className="bg-slate-100 px-1.5 py-0.5 rounded font-bold text-indigo-700">AIzaSy...</code> দিয়ে শুরু হয়।
+                </p>
+              </div>
+
+              <div className="p-3.5 bg-indigo-50/70 border border-indigo-100 rounded-xl text-xs text-indigo-900 space-y-1.5">
+                <p className="font-bold flex items-center">
+                  <Sparkles className="w-4 h-4 mr-1 text-indigo-600" />
+                  কীভাবে সম্পূর্ণ ফ্রিতে API Key পাবেন?
+                </p>
+                <p>
+                  ১. <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="underline font-bold text-indigo-700 inline-flex items-center">Google AI Studio এ যান <ExternalLink className="w-3 h-3 ml-0.5" /></a>
+                </p>
+                <p>২. আপনার জিমেইল দিয়ে লগইন করে <strong>"Create API key"</strong> বাটনে ক্লিক করুন।</p>
+                <p>৩. তৈরি হওয়া Key-টি কপি করে এখানে পেস্ট করে সেভ করুন।</p>
+              </div>
+
+              <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+                {userApiKey && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setApiKeyInput('');
+                      localStorage.removeItem('gemini_api_key');
+                      setUserApiKey('');
+                      setShowApiKeyModal(false);
+                      alert('API Key মুছে ফেলা হয়েছে।');
+                    }}
+                    className="text-xs font-bold text-rose-600 hover:text-rose-800"
+                  >
+                    API Key মুছুন
+                  </button>
+                )}
+                <div className="flex items-center space-x-2 ml-auto">
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKeyModal(false)}
+                    className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition"
+                  >
+                    বাতিল
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs transition"
+                  >
+                    সংরক্ষণ করুন
+                  </button>
+                </div>
               </div>
             </form>
           </div>
