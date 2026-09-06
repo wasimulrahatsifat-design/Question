@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { NextResponse } from 'next/server';
+import { extractAndParseJson } from '@/lib/jsonHelper';
 
 export async function POST(req) {
   try {
@@ -92,6 +93,7 @@ export async function POST(req) {
       'gemini-2.0-flash-lite',
       'gemini-1.5-flash',
       'gemini-1.5-flash-8b',
+      'gemini-1.5-pro',
     ];
 
     try {
@@ -101,7 +103,16 @@ export async function POST(req) {
         const name = m.name?.replace(/^models\//, '');
         const methods = m.supportedGenerationMethods || [];
         const isGenerative = methods.length === 0 || methods.includes('generateContent');
-        if (name && isGenerative && !name.includes('embedding') && !name.includes('aqa') && !name.includes('imagen') && !name.includes('2.5-flash') && !name.includes('1.5-pro')) {
+        if (
+          name && 
+          name.startsWith('gemini-') && 
+          isGenerative && 
+          !name.includes('embedding') && 
+          !name.includes('aqa') && 
+          !name.includes('imagen') && 
+          !name.includes('tts') &&
+          !name.includes('2.5-pro')
+        ) {
           valid.push(name);
         }
       }
@@ -109,8 +120,9 @@ export async function POST(req) {
         const flash2 = valid.filter(n => n === 'gemini-2.0-flash' || (n.includes('2.0-flash') && !n.includes('lite')));
         const flash2Lite = valid.filter(n => n.includes('2.0-flash-lite'));
         const flash15 = valid.filter(n => n.includes('1.5-flash'));
-        const others = valid.filter(n => !flash2.includes(n) && !flash2Lite.includes(n) && !flash15.includes(n));
-        candidateModels = [...new Set([...flash2, ...flash2Lite, ...flash15, ...others, ...candidateModels])];
+        const flash25 = valid.filter(n => n.includes('2.5-flash'));
+        const others = valid.filter(n => !flash2.includes(n) && !flash2Lite.includes(n) && !flash15.includes(n) && !flash25.includes(n));
+        candidateModels = [...new Set([...flash2, ...flash2Lite, ...flash15, ...flash25, ...others, ...candidateModels])];
       }
     } catch (listErr) {
       console.warn('Could not query dynamic models list:', listErr.message);
@@ -159,10 +171,12 @@ export async function POST(req) {
           }
 
           if (responseText) {
-            const cleaned = responseText.replace(/```json/g, '').replace(/```/g, '').trim();
-            resultJson = JSON.parse(cleaned);
-            success = true;
-            break;
+            const parsed = extractAndParseJson(responseText);
+            if (parsed) {
+              resultJson = parsed;
+              success = true;
+              break;
+            }
           }
         } catch (err) {
           lastError = err;

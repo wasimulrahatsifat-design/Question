@@ -213,6 +213,16 @@ export default function AdminPage() {
     }
   }, [selectedClass]);
 
+  // Update syllabus subjects when syllabus class changes in syllabus tab
+  useEffect(() => {
+    if (syllabusClass) {
+      const subs = loadSubjectsForClass(syllabusClass);
+      if (subs.length > 0 && !subs.includes(syllabusSubject)) {
+        setSyllabusSubject(subs[0]);
+      }
+    }
+  }, [syllabusClass]);
+
   // Load syllabus sections when class/subject changes in syllabus tab
   useEffect(() => {
     if (syllabusClass && syllabusSubject) {
@@ -320,7 +330,7 @@ export default function AdminPage() {
     }
 
     setIsUploading(true);
-    setUploadProgressMsg('সোর্স সংরক্ষণ করা হচ্ছে...');
+    setUploadProgressMsg('আপলোড প্রস্তুত করা হচ্ছে...');
 
     try {
       const savedResult = await saveSource({
@@ -331,12 +341,17 @@ export default function AdminPage() {
         file: selectedFile,
         textContent: textContent.trim(),
         pageCount: pdfPageCount,
+        onProgress: (percent) => {
+          setUploadProgressMsg(`UploadThing এ আপলোড হচ্ছে... ${percent}%`);
+        },
       });
 
-      if (savedResult?.storageType === 'supabase') {
+      if (savedResult?.storageType === 'uploadthing') {
+        showToast(`✅ "${sourceTitle}" UploadThing ক্লাউডে সফলভাবে আপলোড ও সংরক্ষিত হয়েছে!`, 'success');
+      } else if (savedResult?.storageType === 'supabase') {
         showToast(`✅ "${sourceTitle}" Supabase ক্লাউডে সফলভাবে সংরক্ষিত হয়েছে!`, 'success');
-      } else if (savedResult?.supabaseError) {
-        showToast(`💾 "${sourceTitle}" লোকাল মেমোরিতে (IndexedDB) সংরক্ষিত হয়েছে (ক্লাউড বার্তা: ${savedResult.supabaseError})`, 'error');
+      } else if (savedResult?.uploadThingError) {
+        showToast(`💾 "${sourceTitle}" লোকাল মেমোরিতে (IndexedDB) সংরক্ষিত হয়েছে`, 'success');
       } else {
         showToast(`💾 "${sourceTitle}" সফলভাবে সংরক্ষিত হয়েছে!`, 'success');
       }
@@ -1616,75 +1631,108 @@ export default function AdminPage() {
                 </button>
               </div>
 
+              {/* Total Marks Summary Banner */}
+              <div className="flex items-center justify-between bg-indigo-50/80 border border-indigo-200 rounded-xl px-4 py-3 text-xs sm:text-sm">
+                <span className="font-bold text-indigo-900">
+                  মোট ধারা: {syllabusSections.length} টি
+                </span>
+                <span className="font-extrabold text-indigo-800 bg-white px-3 py-1.5 rounded-lg border border-indigo-200 shadow-2xs">
+                  সর্বমোট নম্বর: {syllabusSections.reduce((acc, s) => acc + ((s.count !== undefined ? s.count : (s.questionCount !== undefined ? s.questionCount : 0)) * (s.marksPerQuestion || 0)), 0)}
+                </span>
+              </div>
+
               <div className="space-y-3">
-                {syllabusSections.map((sec, idx) => (
-                  <div
-                    key={sec.id || idx}
-                    className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5"
-                  >
-                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                      <div className="sm:col-span-6">
-                        <label className="block text-xs font-bold text-slate-500 mb-1">
-                          ধারার নাম/শিরোনাম
-                        </label>
-                        <input
-                          type="text"
-                          value={sec.title}
-                          onChange={(e) => {
-                            const updated = [...syllabusSections];
-                            updated[idx].title = e.target.value;
-                            setSyllabusSections(updated);
-                          }}
-                          className="w-full text-sm px-3 py-2 border border-slate-300 rounded-lg bg-white font-medium"
-                        />
-                      </div>
+                {syllabusSections.map((sec, idx) => {
+                  const secCount = sec.count !== undefined ? sec.count : (sec.questionCount !== undefined ? sec.questionCount : 1);
+                  const secMarks = sec.marksPerQuestion !== undefined ? sec.marksPerQuestion : 1;
+                  const secTotal = Math.round(secCount * secMarks * 10) / 10;
 
-                      <div className="sm:col-span-2">
-                        <label className="block text-xs font-bold text-slate-500 mb-1">
-                          প্রশ্ন সংখ্যা
-                        </label>
-                        <input
-                          type="number"
-                          value={sec.questionCount}
-                          onChange={(e) => {
-                            const updated = [...syllabusSections];
-                            updated[idx].questionCount = parseInt(e.target.value) || 0;
-                            setSyllabusSections(updated);
-                          }}
-                          className="w-full text-sm px-3 py-2 border border-slate-300 rounded-lg bg-white font-medium"
-                        />
-                      </div>
+                  return (
+                    <div
+                      key={sec.id || idx}
+                      className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5"
+                    >
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                        <div className="sm:col-span-5">
+                          <label className="block text-xs font-bold text-slate-500 mb-1">
+                            ধারার নাম/শিরোনাম
+                          </label>
+                          <input
+                            type="text"
+                            value={sec.title}
+                            onChange={(e) => {
+                              const updated = [...syllabusSections];
+                              updated[idx].title = e.target.value;
+                              setSyllabusSections(updated);
+                            }}
+                            className="w-full text-sm px-3 py-2 border border-slate-300 rounded-lg bg-white font-medium"
+                          />
+                        </div>
 
-                      <div className="sm:col-span-2">
-                        <label className="block text-xs font-bold text-slate-500 mb-1">
-                          প্রতিটির নম্বর
-                        </label>
-                        <input
-                          type="number"
-                          value={sec.marksPerQuestion}
-                          onChange={(e) => {
-                            const updated = [...syllabusSections];
-                            updated[idx].marksPerQuestion = parseFloat(e.target.value) || 0;
-                            setSyllabusSections(updated);
-                          }}
-                          className="w-full text-sm px-3 py-2 border border-slate-300 rounded-lg bg-white font-medium"
-                        />
-                      </div>
+                        <div className="sm:col-span-2">
+                          <label className="block text-xs font-bold text-slate-500 mb-1">
+                            প্রশ্ন সংখ্যা
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="50"
+                            value={secCount}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value) || 0;
+                              const updated = [...syllabusSections];
+                              updated[idx].count = val;
+                              updated[idx].questionCount = val;
+                              setSyllabusSections(updated);
+                            }}
+                            className="w-full text-sm px-3 py-2 border border-slate-300 rounded-lg bg-white font-bold text-center"
+                          />
+                        </div>
 
-                      <div className="sm:col-span-2 flex items-end">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSyllabusSections(syllabusSections.filter((_, i) => i !== idx));
-                          }}
-                          className="w-full py-2 text-sm font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 transition"
-                        >
-                          মুছে ফেলুন
-                        </button>
+                        <div className="sm:col-span-2">
+                          <label className="block text-xs font-bold text-slate-500 mb-1">
+                            প্রতিটির নম্বর
+                          </label>
+                          <input
+                            type="number"
+                            min="0.5"
+                            step="0.5"
+                            max="50"
+                            value={secMarks}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value) || 0;
+                              const updated = [...syllabusSections];
+                              updated[idx].marksPerQuestion = val;
+                              setSyllabusSections(updated);
+                            }}
+                            className="w-full text-sm px-3 py-2 border border-slate-300 rounded-lg bg-white font-bold text-center"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-1 text-center">
+                          <label className="block text-2xs font-bold text-slate-400 mb-1">
+                            মোট
+                          </label>
+                          <span className="text-xs font-black text-slate-800 bg-slate-200/90 px-2 py-1.5 rounded-md inline-block">
+                            {secTotal}
+                          </span>
+                        </div>
+
+                        <div className="sm:col-span-2 flex items-end">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSyllabusSections(syllabusSections.filter((_, i) => i !== idx));
+                            }}
+                            className="w-full py-2 text-xs font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 transition"
+                          >
+                            মুছে ফেলুন
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="pt-3 flex gap-3">

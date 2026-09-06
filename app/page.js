@@ -56,8 +56,29 @@ import {
   KeyRound
 } from 'lucide-react';
 
-const bnLetters = ['ক)', 'খ)', 'গ)', 'ঘ)', 'ঙ)', 'চ)', 'ছ)', 'জ)', 'ঝ)', 'ঞ)'];
+const bnLetters = ['ক)', 'খ)', 'গ)', 'ঘ)', 'ঙ)', 'চ)', 'ছ)', 'জ)', 'ঝ)', 'ঞ)', 'ট)', 'ঠ)', 'ড)', 'ঢ)', 'ণ)'];
 const bnOptPrefixes = ['ক.', 'খ.', 'গ.', 'ঘ.'];
+const enLetters = ['a)', 'b)', 'c)', 'd)', 'e)', 'f)', 'g)', 'h)', 'i)', 'j)', 'k)', 'l)', 'm)', 'n)', 'o)', 'p)'];
+const enRomanNumerals = ['i)', 'ii)', 'iii)', 'iv)', 'v)', 'vi)', 'vii)', 'viii)', 'ix)', 'x)'];
+const enOptPrefixes = ['a.', 'b.', 'c.', 'd.'];
+
+const cleanPoemDisplay = (text) => {
+  if (!text) return '“কবিতার নাম” কবিতা লিখ কবির নামসহ ১ম ৮ লাইন।';
+  return String(text).trim().replace(/^\d+[\।\.\-\s]+/, '').replace(/^[\u09E6-\u09EF]+[\।\.\-\s]+/, '');
+};
+
+const cleanCompositionDisplay = (text) => {
+  if (!text) return 'Write a composition about “The Sundarbans”';
+  let t = String(text).trim().replace(/^\d+[\.\।\-\s]+/, '');
+  if (t.toLowerCase().startsWith('write a composition about')) {
+    return t;
+  }
+  const match = t.match(/[“"']([^“"']+)["'”]/);
+  if (match) {
+    return `Write a composition about “${match[1]}”`;
+  }
+  return `Write a composition about “${t}”`;
+};
 
 export default function PdfQuestionGeneratorPage() {
   // Classes List
@@ -154,6 +175,50 @@ export default function PdfQuestionGeneratorPage() {
       const loaded = loadSectionsForSubject(selectedClass, selectedSubject);
       setSectionList(loaded);
     }
+  }, [selectedClass, selectedSubject]);
+
+  // Sync presets & subjects immediately whenever changed in Admin or another window
+  useEffect(() => {
+    const handlePresetsUpdated = (e) => {
+      const { className, subject } = e?.detail || {};
+      if (!className || !subject || (className === selectedClass && subject === selectedSubject)) {
+        const loaded = loadSectionsForSubject(selectedClass, selectedSubject);
+        setSectionList(loaded);
+      }
+    };
+
+    const handleSubjectsUpdated = (e) => {
+      const classSubs = loadSubjectsForClass(selectedClass);
+      setSubjectsList(classSubs);
+      if (!classSubs.includes(selectedSubject)) {
+        setSelectedSubject(classSubs[0] || 'বাংলা');
+      }
+    };
+
+    const handleClassesUpdated = () => {
+      setClassesList(loadClassesList());
+    };
+
+    const handleWindowFocus = () => {
+      if (selectedClass && selectedSubject) {
+        const loaded = loadSectionsForSubject(selectedClass, selectedSubject);
+        setSectionList(loaded);
+      }
+    };
+
+    window.addEventListener('exam_presets_updated', handlePresetsUpdated);
+    window.addEventListener('exam_subjects_updated', handleSubjectsUpdated);
+    window.addEventListener('exam_classes_updated', handleClassesUpdated);
+    window.addEventListener('storage', handleWindowFocus);
+    window.addEventListener('focus', handleWindowFocus);
+
+    return () => {
+      window.removeEventListener('exam_presets_updated', handlePresetsUpdated);
+      window.removeEventListener('exam_subjects_updated', handleSubjectsUpdated);
+      window.removeEventListener('exam_classes_updated', handleClassesUpdated);
+      window.removeEventListener('storage', handleWindowFocus);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
   }, [selectedClass, selectedSubject]);
 
   // When selectedClass or selectedSubject changes, load available sources from storage
@@ -721,62 +786,76 @@ export default function PdfQuestionGeneratorPage() {
 
   // Helper to render a question section in the Question Paper preview
   const renderQuestionPaperSection = (section, sIndex) => {
-    const qCount = section.questions?.length || 0;
-    const markPerQ = section.marksPerQuestion || 1;
-    const totalSecMarks = qCount * markPerQ;
+    const isEnglish = Boolean(selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english')));
+    const qCount = section.questions ? section.questions.length : (section.count || 1);
+    const markPerQ = section.marksPerQuestion !== undefined ? section.marksPerQuestion : 1;
+    const totalSecMarks = Math.round(qCount * markPerQ * 10) / 10;
 
-    const isVocab = section.id?.includes('vocab') || section.title?.includes('শব্দার্থ');
-    const isSentence = section.id?.includes('sentence') || section.title?.includes('বাক্য গঠন');
+    const isVocab = section.id?.includes('vocab') || section.id?.includes('word_meaning') || section.title?.includes('শব্দার্থ') || section.title?.toLowerCase().includes('word meaning');
+    const isSentence = section.id?.includes('sentence') || section.id?.includes('make_sentence') || section.title?.includes('বাক্য গঠন') || section.title?.toLowerCase().includes('make sentence');
     const isPoem = section.id?.includes('poem') || section.title?.includes('কবিতা');
-    const isPunctuation = section.id?.includes('punctuation') || section.title?.includes('বিরাম');
+    const isPunctuation = section.id?.includes('punctuation') || section.title?.includes('বিরাম') || section.title?.toLowerCase().includes('punctuation') || section.title?.toLowerCase().includes('capital letters');
+    const isComposition = section.id?.includes('composition') || section.title?.toLowerCase().includes('composition') || section.title?.includes('রচনা');
     const isConjunct = section.id?.includes('conjunct') || section.title?.includes('যুক্তবর্ণ');
     const isInlineComma = isVocab || isSentence || isConjunct;
-    const isSinglePrompt = isPunctuation || ((section.id?.includes('theme') || section.id?.includes('desc') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('রচনা') || section.title?.includes('বর্ণনামূলক')) && section.questions?.length <= 1);
-    const isMatchSec = section.id?.includes('match') || section.title?.includes('মিল') || section.title?.toLowerCase().includes('match');
+    const isSinglePrompt = isPunctuation || ((section.id?.includes('theme') || section.id?.includes('desc') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('বর্ণনামূলক')) && section.questions?.length <= 1);
+    const isMatchSec = (section.id?.includes('match') || section.title?.includes('মিল') || section.title?.toLowerCase().includes('match')) && !section.title?.toLowerCase().includes('question') && !section.id?.includes('questions');
     const isMcq = section.id?.includes('mcq') || section.title?.includes('সঠিক উত্তর') || (section.questions?.[0]?.options?.length > 0);
+
+    const isSingleMathProblem = section.questions?.length === 1 && (section.id?.startsWith('math_word') || section.id?.startsWith('math_problem') || section.id === 'math_lcm_gcd');
+
+    const sectionNumStr = isEnglish ? `${sIndex + 1}.` : `${toBengaliNumerals(sIndex + 1)}।`;
+    const secMarksStr = isEnglish ? (totalSecMarks < 10 ? `0${totalSecMarks}` : String(totalSecMarks)) : toBengaliNumerals(totalSecMarks, true);
 
     return (
       <div key={section.id || sIndex} className="space-y-2 pt-2">
         {/* Section Header */}
-        {isPoem ? (
+        {isPoem || isComposition || isSingleMathProblem ? (
           <div className="flex items-center justify-between border-b border-slate-200 pb-1">
             <div className="flex items-center space-x-1.5 flex-1 mr-2">
               <span className="text-sm font-bold text-slate-900 flex-shrink-0">
-                {toBengaliNumerals(sIndex + 1)}।
+                {sectionNumStr}
               </span>
               <input
                 type="text"
-                value={cleanPoemDisplay(section.questions?.[0]?.questionText || section.title)}
+                value={
+                  isComposition 
+                    ? cleanCompositionDisplay(section.questions?.[0]?.questionText || section.title)
+                    : isPoem
+                    ? cleanPoemDisplay(section.questions?.[0]?.questionText || section.title)
+                    : (section.questions?.[0]?.questionText || section.title)
+                }
                 onChange={(e) => {
-                  const cleaned = cleanPoemDisplay(e.target.value);
+                  const val = e.target.value;
+                  const cleaned = isComposition ? cleanCompositionDisplay(val) : (isPoem ? cleanPoemDisplay(val) : val);
                   handleQuestionTextChange(sIndex, 0, cleaned);
                   handleSectionTitleChange(sIndex, cleaned);
                 }}
                 className="text-sm font-bold text-slate-900 w-full p-1 bg-transparent hover:bg-slate-100 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded border-0"
-                placeholder="“কবিতার নাম” কবিতা লিখ কবির নামসহ ১ম ৮ লাইন।"
+                placeholder={isComposition ? 'Write a composition about “The Sundarbans”' : 'প্রশ্ন লিখুন...'}
               />
             </div>
             <span className="text-sm font-bold text-slate-800 flex-shrink-0">
-              {toBengaliNumerals(totalSecMarks, true)}
+              {secMarksStr}
             </span>
           </div>
         ) : (
           <div className="flex items-center justify-between border-b border-slate-200 pb-1">
             <span className="text-sm font-bold text-slate-900">
-              {toBengaliNumerals(sIndex + 1)}। {section.title}
+              {sectionNumStr} {section.title}
             </span>
             <span className="text-sm font-bold text-slate-800">
-              {toBengaliNumerals(totalSecMarks, true)}
+              {secMarksStr}
             </span>
           </div>
         )}
 
-        {/* 1. Comma-separated single line words (শব্দার্থ, বাক্য গঠন, যুক্তবর্ণ) */}
+        {/* 1. Comma-separated single line words (শব্দার্থ, বাক্য গঠন, যুক্তবর্ণ, Word Meaning, Make Sentence) */}
         {isInlineComma ? (
           <div className="space-y-2">
-            <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-medium text-slate-900 leading-relaxed">
-              {section.questions?.map((q) => q.questionText).filter(Boolean).join(', ') || (
-                <span className="text-slate-400 italic">কোনো শব্দ নেই</span>
+            <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-medium text-slate-900 leading-relaxed font-mono sm:font-sans">
+              {section.questions?.map((q) => cleanQuestionText(q.questionText)).filter(Boolean).join(', ') || (
+                <span className="text-slate-400 italic">{isEnglish ? 'No words added' : 'কোনো শব্দ নেই'}</span>
               )}
             </div>
             {/* Word Chips / Quick Editor */}
@@ -787,8 +866,8 @@ export default function PdfQuestionGeneratorPage() {
                     type="text"
                     value={q.questionText}
                     onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
-                    className="text-xs font-semibold text-slate-800 w-20 sm:w-24 focus:outline-none"
-                    placeholder="শব্দ..."
+                    className="text-xs font-semibold text-slate-800 w-20 sm:w-28 focus:outline-none"
+                    placeholder="Word / শব্দ..."
                   />
                   <button
                     type="button"
@@ -805,15 +884,15 @@ export default function PdfQuestionGeneratorPage() {
                 onClick={() => handleAddQuestion(sIndex)}
                 className="text-xs text-indigo-600 hover:text-indigo-800 font-bold inline-flex items-center px-2 py-1 bg-indigo-50 border border-indigo-200 rounded-lg"
               >
-                <Plus className="w-3 h-3 mr-0.5" /> শব্দ যোগ
+                <Plus className="w-3 h-3 mr-0.5" /> {isEnglish ? '+ Add Word' : 'শব্দ যোগ'}
               </button>
             </div>
           </div>
-        ) : isPoem ? (
-          /* Poem is fully displayed on the top header line without extra boxes */
+        ) : (isPoem || isComposition || isSingleMathProblem) ? (
+          /* Poem, Composition, and Single Math Problems are fully displayed on the top header line without extra boxes */
           null
         ) : isSinglePrompt ? (
-          /* 2. Single Prompt (বিরাম চিহ্ন, বর্ণনামূলক প্রশ্ন / রচনা) - No ক) */
+          /* 2. Single Prompt (বিরাম চিহ্ন, Composition, Punctuation, রচনা) */
           <div className="space-y-2">
             {section.questions?.map((q, qIndex) => (
               <div key={q.id || qIndex} className="flex items-start justify-between gap-2">
@@ -822,7 +901,7 @@ export default function PdfQuestionGeneratorPage() {
                   onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
                   rows={isPunctuation ? 3 : 2}
                   className="w-full text-sm p-2 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 font-medium"
-                  placeholder="প্রশ্ন বা অনুচ্ছেদ লিখুন..."
+                  placeholder={isEnglish ? 'Enter prompt or paragraph...' : 'প্রশ্ন বা অনুচ্ছেদ লিখুন...'}
                 />
                 <button
                   onClick={() => handleDeleteQuestion(sIndex, qIndex)}
@@ -837,52 +916,59 @@ export default function PdfQuestionGeneratorPage() {
                 onClick={() => handleAddQuestion(sIndex)}
                 className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center pt-1"
               >
-                <Plus className="w-3.5 h-3.5 mr-0.5" /> প্রশ্ন যোগ
+                <Plus className="w-3.5 h-3.5 mr-0.5" /> {isEnglish ? '+ Add Prompt' : 'প্রশ্ন যোগ'}
               </button>
             )}
           </div>
         ) : isMatchSec && section.questions?.length > 0 ? (
-          /* 3. Matching Table */
+          /* 3. Matching Table (Column A & Column B) */
           <div className="border border-slate-400 rounded-lg overflow-hidden text-xs">
             <div className="grid grid-cols-2 bg-slate-100 p-1.5 font-bold text-slate-800 border-b border-slate-400 text-center">
-              <div className="border-r border-slate-400">বামপাশ</div>
-              <div>ডানপাশ</div>
+              <div className="border-r border-slate-400">{isEnglish ? 'Column A' : 'বামপাশ'}</div>
+              <div>{isEnglish ? 'Column B' : 'ডানপাশ'}</div>
             </div>
             <div className="divide-y divide-slate-300">
-              {section.questions.map((q, qIndex) => (
-                <div key={q.id || qIndex} className="grid grid-cols-2 text-xs">
-                  <div className="p-1.5 border-r border-slate-300 flex items-center space-x-1.5">
-                    <span className="font-bold text-slate-600">{bnLetters[qIndex] || `(${qIndex + 1})`}</span>
-                    <input
-                      type="text"
-                      value={q.questionText}
-                      onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
-                      className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-indigo-500"
-                    />
+              {section.questions.map((q, qIndex) => {
+                const leftLabel = isEnglish ? (enLetters[qIndex] || `${qIndex + 1})`) : (bnLetters[qIndex] || `(${qIndex + 1})`);
+                const rightLabel = isEnglish ? (enRomanNumerals[qIndex] || `${qIndex + 1})`) : '';
+                return (
+                  <div key={q.id || qIndex} className="grid grid-cols-2 text-xs">
+                    <div className="p-1.5 border-r border-slate-300 flex items-center space-x-1.5">
+                      <span className="font-bold text-slate-600 flex-shrink-0">{leftLabel}</span>
+                      <input
+                        type="text"
+                        value={q.questionText}
+                        onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                        className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div className="p-1.5 flex items-center space-x-1.5">
+                      {rightLabel && <span className="font-bold text-slate-500 text-2xs flex-shrink-0">{rightLabel}</span>}
+                      <input
+                        type="text"
+                        value={q.answer}
+                        onChange={(e) => handleAnswerTextChange(sIndex, qIndex, e.target.value)}
+                        className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-emerald-500 text-emerald-900 font-medium"
+                      />
+                      <button
+                        onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                        className="text-slate-300 hover:text-red-500 p-0.5"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
-                  <div className="p-1.5 flex items-center space-x-1.5">
-                    <input
-                      type="text"
-                      value={q.answer}
-                      onChange={(e) => handleAnswerTextChange(sIndex, qIndex, e.target.value)}
-                      className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-emerald-500 text-emerald-900 font-medium"
-                    />
-                    <button
-                      onClick={() => handleDeleteQuestion(sIndex, qIndex)}
-                      className="text-slate-300 hover:text-red-500 p-0.5"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         ) : (
-          /* 4. Standard List Questions (শূন্যস্থান, সাধারণ প্রশ্ন, সত্য-মিথ্যা) */
+          /* 4. Standard List Questions (শূন্যস্থান, সাধারণ প্রশ্ন, সত্য-মিথ্যা, True/False, Questions) */
           <div className="space-y-2">
             {section.questions?.map((q, qIndex) => {
-              const subPrefix = isMcq ? `${toBengaliNumerals(qIndex + 1)}) ` : `${bnLetters[qIndex] || `(${qIndex + 1})`} `;
+              const subPrefix = isEnglish
+                ? `${enLetters[qIndex] || `(${qIndex + 1})`} `
+                : (isMcq ? `${toBengaliNumerals(qIndex + 1)}) ` : `${bnLetters[qIndex] || `(${qIndex + 1})`} `);
               return (
                 <div key={q.id || qIndex} className="space-y-1 text-sm">
                   <div className="flex items-start justify-between gap-2">
@@ -907,7 +993,7 @@ export default function PdfQuestionGeneratorPage() {
                       {q.options.slice(0, 2).map((opt, optIndex) => (
                         <div key={optIndex} className="flex items-center space-x-1.5">
                           <span className="text-xs font-bold text-slate-600">
-                            {bnOptPrefixes[optIndex] || `${optIndex + 1}.`}
+                            {isEnglish ? `${optIndex + 1}.` : (bnOptPrefixes[optIndex] || `${optIndex + 1}.`)}
                           </span>
                           <input
                             type="text"
@@ -926,7 +1012,7 @@ export default function PdfQuestionGeneratorPage() {
               onClick={() => handleAddQuestion(sIndex)}
               className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center pt-1"
             >
-              <Plus className="w-3.5 h-3.5 mr-0.5" /> প্রশ্ন যোগ
+              <Plus className="w-3.5 h-3.5 mr-0.5" /> {isEnglish ? '+ Add Question' : 'প্রশ্ন যোগ'}
             </button>
           </div>
         )}
@@ -1686,13 +1772,29 @@ export default function PdfQuestionGeneratorPage() {
                             <h2 className="text-lg font-bold text-slate-900 leading-tight">{schoolName}</h2>
                             {schoolSubtitle && <p className="text-sm font-semibold text-slate-700">{schoolSubtitle}</p>}
                             <p className="text-sm font-bold text-slate-800 pt-0.5">{examTitle}</p>
-                            <p className="text-sm font-bold text-slate-800">বিষয়: {selectedSubject}</p>
-                            <p className="text-sm font-bold text-slate-800 pb-1">শ্রেণি: {selectedClass}</p>
+                            <p className="text-sm font-bold text-slate-800">
+                              {selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english'))
+                                ? `Subject- ${selectedSubject}`
+                                : `বিষয়: ${selectedSubject}`}
+                            </p>
+                            <p className="text-sm font-bold text-slate-800 pb-1">
+                              {selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english'))
+                                ? `Class- ${selectedClass === 'পঞ্চম' ? 'Five' : selectedClass}`
+                                : `শ্রেণি: ${selectedClass}`}
+                            </p>
 
                             {/* Time & Full Marks Bar */}
                             <div className="flex items-center justify-between text-sm font-medium text-slate-800 pt-2 border-t border-slate-100 px-1">
-                              <span>সময়: {timeAllowed}</span>
-                              <span>পূর্ণমান: {toBengaliNumerals(fullMarks || totalCalculatedMarks)}</span>
+                              <span>
+                                {selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english'))
+                                  ? `Time: ${timeAllowed}`
+                                  : `সময়: ${timeAllowed}`}
+                              </span>
+                              <span>
+                                {selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english'))
+                                  ? `Full marks: ${fullMarks || totalCalculatedMarks}`
+                                  : `পূর্ণমান: ${toBengaliNumerals(fullMarks || totalCalculatedMarks)}`}
+                              </span>
                             </div>
                           </div>
 
