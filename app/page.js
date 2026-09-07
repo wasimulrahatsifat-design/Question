@@ -121,6 +121,7 @@ export default function PdfQuestionGeneratorPage() {
   const [newSecCount, setNewSecCount] = useState(5);
   const [newSecMarks, setNewSecMarks] = useState(1);
   const [newSecIsMcq, setNewSecIsMcq] = useState(false);
+  const [newSecSourceId, setNewSecSourceId] = useState('');
 
   // Admin Setup Modal State
   const [showAdminModal, setShowAdminModal] = useState(false);
@@ -190,18 +191,36 @@ export default function PdfQuestionGeneratorPage() {
     const handleSubjectsUpdated = (e) => {
       const classSubs = loadSubjectsForClass(selectedClass);
       setSubjectsList(classSubs);
-      if (!classSubs.includes(selectedSubject)) {
-        setSelectedSubject(classSubs[0] || 'বাংলা');
+      if (classSubs.length > 0 && !classSubs.includes(selectedSubject)) {
+        setSelectedSubject(classSubs[0]);
       }
     };
 
-    const handleClassesUpdated = () => {
-      setClassesList(loadClassesList());
+    const handleClassesUpdated = (e) => {
+      const clsList = loadClassesList();
+      setClassesList(clsList);
+      if (clsList.length > 0 && !clsList.includes(selectedClass)) {
+        setSelectedClass(clsList[0]);
+      }
     };
 
     const handleWindowFocus = () => {
-      if (selectedClass && selectedSubject) {
-        const loaded = loadSectionsForSubject(selectedClass, selectedSubject);
+      const clsList = loadClassesList();
+      setClassesList(clsList);
+      let currentCls = selectedClass;
+      if (clsList.length > 0 && !clsList.includes(selectedClass)) {
+        currentCls = clsList[0];
+        setSelectedClass(currentCls);
+      }
+      const classSubs = loadSubjectsForClass(currentCls);
+      setSubjectsList(classSubs);
+      let currentSub = selectedSubject;
+      if (classSubs.length > 0 && !classSubs.includes(selectedSubject)) {
+        currentSub = classSubs[0];
+        setSelectedSubject(currentSub);
+      }
+      if (currentCls && currentSub) {
+        const loaded = loadSectionsForSubject(currentCls, currentSub);
         setSectionList(loaded);
       }
     };
@@ -220,6 +239,7 @@ export default function PdfQuestionGeneratorPage() {
       window.removeEventListener('focus', handleWindowFocus);
     };
   }, [selectedClass, selectedSubject]);
+
 
   // When selectedClass or selectedSubject changes, load available sources from storage
   useEffect(() => {
@@ -316,6 +336,7 @@ export default function PdfQuestionGeneratorPage() {
     e.preventDefault();
     if (!newSecTitle.trim()) return;
 
+    const matchedSrc = availableSources.find((s) => s.id === newSecSourceId);
     const newSection = {
       id: `custom_${Date.now()}`,
       title: newSecTitle.trim(),
@@ -558,12 +579,30 @@ export default function PdfQuestionGeneratorPage() {
       }
     });
 
+    const activeSections = sectionList.filter((s) => s.enabled).map((sec) => {
+      const copy = { ...sec };
+      if (copy.sourceId && copy.sourceId !== 'all' && copy.sourceId !== 'default') {
+        const foundSrc = availableSources.find((s) => s.id === copy.sourceId);
+        if (foundSrc) {
+          copy.sourceTitle = foundSrc.title;
+          const alreadyInSelected = selectedItems.some((item) => item.source.id === foundSrc.id);
+          if (!alreadyInSelected) {
+            selectedItems.push({
+              source: foundSrc,
+              startPage: 1,
+              endPage: foundSrc.pageCount || 1,
+            });
+          }
+        }
+      }
+      return copy;
+    });
+
     if (selectedItems.length === 0) {
-      setErrorMessage('অনুগ্রহ করে প্রশ্নপত্র তৈরি করতে কমপক্ষে একটি সোর্স বা অধ্যায় নির্বাচন করুন।');
+      setErrorMessage('অনুগ্রহ করে প্রশ্নপত্র তৈরি করতে কমপক্ষে একটি সোর্স বা অধ্যায় নির্বাচন করুন অথবা ধারার জন্য নির্দিষ্ট সোর্স সিলেক্ট করুন।');
       return;
     }
 
-    const activeSections = sectionList.filter((s) => s.enabled);
     if (activeSections.length === 0) {
       setErrorMessage('কমপক্ষে একটি সেকশন অন রাখুন।');
       return;
@@ -803,6 +842,16 @@ export default function PdfQuestionGeneratorPage() {
     const isMcq = section.id?.includes('mcq') || section.title?.includes('সঠিক উত্তর') || (section.questions?.[0]?.options?.length > 0);
 
     const isSingleMathProblem = section.questions?.length === 1 && (section.id?.startsWith('math_word') || section.id?.startsWith('math_problem') || section.id === 'math_lcm_gcd');
+    const isMathGrid = (
+      section.id === 'math_blank_box' ||
+      section.id === 'math_mul_div' ||
+      section.id === 'math_decimal_mul_div' ||
+      section.title?.includes('খালি ঘর') ||
+      (section.title?.includes('গুণ') && (section.title?.includes('ভাগ') || section.title?.includes('কর'))) ||
+      section.title?.includes('ভাগ কর') ||
+      section.title?.includes('গুণ কর') ||
+      section.title?.includes('দশমিকের গুণ')
+    ) && (section.questions?.length >= 4);
 
     const sectionNumStr = isEnglish ? `${sIndex + 1}.` : `${toBengaliNumerals(sIndex + 1)}।`;
     const secMarksStr = isEnglish ? (totalSecMarks < 10 ? `0${totalSecMarks}` : String(totalSecMarks)) : toBengaliNumerals(totalSecMarks, true);
@@ -810,7 +859,29 @@ export default function PdfQuestionGeneratorPage() {
     return (
       <div key={section.id || sIndex} className="space-y-2 pt-2">
         {/* Section Header */}
-        {isPoem || isComposition || isSingleMathProblem ? (
+        {isSingleMathProblem ? (
+          <div className="flex items-start justify-between border-b border-slate-200 pb-1">
+            <div className="flex items-start space-x-1.5 flex-1 mr-2">
+              <span className="text-sm font-bold text-slate-900 flex-shrink-0 pt-0.5">
+                {sectionNumStr}
+              </span>
+              <textarea
+                rows={2}
+                value={cleanQuestionText(section.questions?.[0]?.questionText || section.title)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  handleQuestionTextChange(sIndex, 0, val);
+                  handleSectionTitleChange(sIndex, val);
+                }}
+                className="text-sm font-normal text-slate-900 w-full p-1 bg-transparent hover:bg-slate-100 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded border-0 resize-y"
+                placeholder="গাণিতিক সমস্যা লিখুন..."
+              />
+            </div>
+            <span className="text-sm font-bold text-slate-800 flex-shrink-0 pt-0.5">
+              {secMarksStr}
+            </span>
+          </div>
+        ) : isPoem || isComposition ? (
           <div className="flex items-center justify-between border-b border-slate-200 pb-1">
             <div className="flex items-center space-x-1.5 flex-1 mr-2">
               <span className="text-sm font-bold text-slate-900 flex-shrink-0">
@@ -821,13 +892,11 @@ export default function PdfQuestionGeneratorPage() {
                 value={
                   isComposition 
                     ? cleanCompositionDisplay(section.questions?.[0]?.questionText || section.title)
-                    : isPoem
-                    ? cleanPoemDisplay(section.questions?.[0]?.questionText || section.title)
-                    : (section.questions?.[0]?.questionText || section.title)
+                    : cleanPoemDisplay(section.questions?.[0]?.questionText || section.title)
                 }
                 onChange={(e) => {
                   const val = e.target.value;
-                  const cleaned = isComposition ? cleanCompositionDisplay(val) : (isPoem ? cleanPoemDisplay(val) : val);
+                  const cleaned = isComposition ? cleanCompositionDisplay(val) : cleanPoemDisplay(val);
                   handleQuestionTextChange(sIndex, 0, cleaned);
                   handleSectionTitleChange(sIndex, cleaned);
                 }}
@@ -887,6 +956,76 @@ export default function PdfQuestionGeneratorPage() {
                 <Plus className="w-3 h-3 mr-0.5" /> {isEnglish ? '+ Add Word' : 'শব্দ যোগ'}
               </button>
             </div>
+          </div>
+        ) : isMathGrid ? (
+          /* Math Equation 2-Row Grid: Row 1 (ক, খ, গ), Row 2 (ঘ, ঙ) */
+          <div className="space-y-2">
+            {/* Row 1: First 3 items (ক, খ, গ) */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {section.questions?.slice(0, 3).map((q, qIndex) => {
+                const subPrefix = isEnglish ? (enLetters[qIndex] || `${qIndex + 1})`) : (bnLetters[qIndex] || `(${qIndex + 1})`);
+                return (
+                  <div key={q.id || qIndex} className="flex items-center space-x-1 bg-slate-50/90 border border-slate-200 rounded-lg px-2 py-1 shadow-2xs">
+                    <span className="font-bold text-slate-700 text-xs flex-shrink-0">{subPrefix}</span>
+                    <input
+                      type="text"
+                      value={cleanQuestionText(q.questionText)}
+                      onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                      className="w-full text-xs font-semibold text-slate-900 bg-transparent border-0 focus:ring-1 focus:ring-indigo-500 rounded px-1"
+                      placeholder="সমীকরণ / হিসাব..."
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                      className="text-slate-300 hover:text-red-500 p-0.5 flex-shrink-0"
+                      title="মুছুন"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Row 2: Remaining items (ঘ, ঙ) */}
+            {section.questions && section.questions.length > 3 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:w-2/3">
+                {section.questions.slice(3, 5).map((q, relIdx) => {
+                  const qIndex = relIdx + 3;
+                  const subPrefix = isEnglish ? (enLetters[qIndex] || `${qIndex + 1})`) : (bnLetters[qIndex] || `(${qIndex + 1})`);
+                  return (
+                    <div key={q.id || qIndex} className="flex items-center space-x-1 bg-slate-50/90 border border-slate-200 rounded-lg px-2 py-1 shadow-2xs">
+                      <span className="font-bold text-slate-700 text-xs flex-shrink-0">{subPrefix}</span>
+                      <input
+                        type="text"
+                        value={cleanQuestionText(q.questionText)}
+                        onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                        className="w-full text-xs font-semibold text-slate-900 bg-transparent border-0 focus:ring-1 focus:ring-indigo-500 rounded px-1"
+                        placeholder="সমীকরণ / হিসাব..."
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                        className="text-slate-300 hover:text-red-500 p-0.5 flex-shrink-0"
+                        title="মুছুন"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {(!section.questions || section.questions.length < 5) && (
+              <button
+                type="button"
+                onClick={() => handleAddQuestion(sIndex)}
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center pt-1"
+              >
+                <Plus className="w-3.5 h-3.5 mr-0.5" /> {isEnglish ? '+ Add Equation' : 'হিসাব যোগ'}
+              </button>
+            )}
           </div>
         ) : (isPoem || isComposition || isSingleMathProblem) ? (
           /* Poem, Composition, and Single Math Problems are fully displayed on the top header line without extra boxes */
@@ -1576,40 +1715,145 @@ export default function PdfQuestionGeneratorPage() {
                       </div>
 
                       {sec.enabled && (
-                        <div className="grid grid-cols-2 gap-2.5 pl-6">
-                          <div className="flex items-center space-x-2 bg-white p-1.5 rounded-lg border border-slate-200">
-                            <span className="text-xs text-slate-500 font-medium pl-1">প্রশ্ন:</span>
-                            <input 
-                              type="number"
-                              min="1"
-                              max="30"
-                              value={sec.count}
-                              onChange={(e) => {
-                                const updated = [...sectionList];
-                                updated[idx].count = parseInt(e.target.value) || 1;
-                                setSectionList(updated);
-                                saveSectionsForSubject(selectedClass, selectedSubject, updated);
-                              }}
-                              className="w-12 text-sm text-center font-bold focus:outline-none"
-                            />
+                        <div className="space-y-2 pl-6">
+                          <div className="grid grid-cols-2 gap-2.5">
+                            <div className="flex items-center space-x-2 bg-white p-1.5 rounded-lg border border-slate-200">
+                              <span className="text-xs text-slate-500 font-medium pl-1">প্রশ্ন:</span>
+                              <input 
+                                type="number"
+                                min="1"
+                                max="30"
+                                value={sec.count}
+                                onChange={(e) => {
+                                  const updated = [...sectionList];
+                                  updated[idx].count = parseInt(e.target.value) || 1;
+                                  setSectionList(updated);
+                                  saveSectionsForSubject(selectedClass, selectedSubject, updated);
+                                }}
+                                className="w-12 text-sm text-center font-bold focus:outline-none"
+                              />
+                            </div>
+
+                            <div className="flex items-center space-x-2 bg-white p-1.5 rounded-lg border border-slate-200">
+                              <span className="text-xs text-slate-500 font-medium pl-1">মান/প্রশ্ন:</span>
+                              <input 
+                                type="number"
+                                min="1"
+                                max="30"
+                                value={sec.marksPerQuestion}
+                                onChange={(e) => {
+                                  const updated = [...sectionList];
+                                  updated[idx].marksPerQuestion = parseInt(e.target.value) || 1;
+                                  setSectionList(updated);
+                                  saveSectionsForSubject(selectedClass, selectedSubject, updated);
+                                }}
+                                className="w-12 text-sm text-center font-bold focus:outline-none"
+                              />
+                            </div>
                           </div>
 
-                          <div className="flex items-center space-x-2 bg-white p-1.5 rounded-lg border border-slate-200">
-                            <span className="text-xs text-slate-500 font-medium pl-1">মান/প্রশ্ন:</span>
-                            <input 
-                              type="number"
-                              min="1"
-                              max="30"
-                              value={sec.marksPerQuestion}
+                          {/* Dedicated Source Selector for this Section */}
+                          <div className="bg-white p-2 rounded-xl border border-slate-200 space-y-1 shadow-2xs">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] font-bold text-slate-700 flex items-center">
+                                <BookOpen className="w-3.5 h-3.5 mr-1 text-indigo-600" />
+                                এই ধারার নির্দিষ্ট সোর্স:
+                              </span>
+                              {sec.sourceId && sec.sourceId !== 'all' && (
+                                <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
+                                  কাস্টম সোর্স
+                                </span>
+                              )}
+                            </div>
+
+                            <select
+                              value={sec.sourceId || ''}
                               onChange={(e) => {
+                                const val = e.target.value;
                                 const updated = [...sectionList];
-                                updated[idx].marksPerQuestion = parseInt(e.target.value) || 1;
+                                updated[idx].sourceId = val || null;
+                                const match = availableSources.find((s) => s.id === val);
+                                updated[idx].sourceTitle = match ? match.title : null;
                                 setSectionList(updated);
                                 saveSectionsForSubject(selectedClass, selectedSubject, updated);
                               }}
-                              className="w-12 text-sm text-center font-bold focus:outline-none"
-                            />
+                              className="w-full text-xs px-2 py-1.5 border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-medium text-slate-800"
+                            >
+                              <option value="">📁 মেইন সোর্সসমূহ (ডিফল্ট)</option>
+                              {availableSources.map((src) => (
+                                <option key={src.id} value={src.id}>
+                                  {src.type === 'pdf' ? '📕' : src.type === 'image' ? '🖼️' : '📝'} {src.title}
+                                </option>
+                              ))}
+                            </select>
                           </div>
+
+                          {/* Math Mode Selector (শুধু গুণ / শুধু ভাগ / মিশ্রণ) for Section 4, 5 and arithmetic sections */}
+                          {(sec.id === 'math_mul_div' || sec.id === 'math_decimal_mul_div' || (sec.title && (sec.title.includes('গুণ') || sec.title.includes('ভাগ')))) && (
+                            <div className="bg-white p-2 rounded-xl border border-slate-200 space-y-1.5 shadow-2xs">
+                              <span className="text-[11px] font-bold text-slate-700 block">
+                                গাণিতিক মোড নির্বাচন:
+                              </span>
+                              <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-lg">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const updated = [...sectionList];
+                                    const isDecimal = sec.id === 'math_decimal_mul_div' || sec.title.includes('দশমিক');
+                                    updated[idx].mathMode = 'multiply';
+                                    updated[idx].title = isDecimal ? 'দশমিকের গুণ কর' : 'গুণ কর';
+                                    setSectionList(updated);
+                                    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+                                  }}
+                                  className={`text-[11px] font-bold py-1 px-1 rounded-md transition text-center ${
+                                    sec.mathMode === 'multiply' || (sec.title?.includes('গুণ') && !sec.title?.includes('ভাগ'))
+                                      ? 'bg-indigo-600 text-white shadow-2xs'
+                                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                                  }`}
+                                >
+                                  শুধু গুণ
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const updated = [...sectionList];
+                                    const isDecimal = sec.id === 'math_decimal_mul_div' || sec.title.includes('দশমিক');
+                                    updated[idx].mathMode = 'divide';
+                                    updated[idx].title = isDecimal ? 'দশমিকের ভাগ কর' : 'ভাগ কর';
+                                    setSectionList(updated);
+                                    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+                                  }}
+                                  className={`text-[11px] font-bold py-1 px-1 rounded-md transition text-center ${
+                                    sec.mathMode === 'divide' || (sec.title?.includes('ভাগ') && !sec.title?.includes('গুণ'))
+                                      ? 'bg-indigo-600 text-white shadow-2xs'
+                                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                                  }`}
+                                >
+                                  শুধু ভাগ
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const updated = [...sectionList];
+                                    const isDecimal = sec.id === 'math_decimal_mul_div' || sec.title.includes('দশমিক');
+                                    updated[idx].mathMode = 'mixture';
+                                    updated[idx].title = isDecimal ? 'দশমিকের গুণ ও ভাগ কর' : 'গুণ / ভাগ কর (বা উভয়টির মিশ্রণ)';
+                                    setSectionList(updated);
+                                    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+                                  }}
+                                  className={`text-[11px] font-bold py-1 px-1 rounded-md transition text-center ${
+                                    sec.mathMode === 'mixture' || (sec.title?.includes('গুণ') && sec.title?.includes('ভাগ')) || (!sec.mathMode)
+                                      ? 'bg-indigo-600 text-white shadow-2xs'
+                                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                                  }`}
+                                >
+                                  মিশ্রণ
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1619,7 +1863,7 @@ export default function PdfQuestionGeneratorPage() {
 
               {/* Generate Button */}
               {(() => {
-                const hasSelectedSources = Object.values(selectedSourceConfigs).some((c) => c.selected);
+                const hasSelectedSources = Object.values(selectedSourceConfigs).some((c) => c.selected) || sectionList.some((s) => s.enabled && s.sourceId);
                 return (
                   <button
                     onClick={handleGenerateQuestions}
@@ -2633,6 +2877,27 @@ export default function PdfQuestionGeneratorPage() {
                     className="w-full text-base px-3.5 py-2 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1">
+                  নির্দিষ্ট সোর্স নির্বাচন (ঐচ্ছিক)
+                </label>
+                <select
+                  value={newSecSourceId}
+                  onChange={(e) => setNewSecSourceId(e.target.value)}
+                  className="w-full text-sm px-3.5 py-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-slate-50 font-medium"
+                >
+                  <option value="">📁 মেইন সোর্সসমূহ (ডিফল্ট)</option>
+                  {availableSources.map((src) => (
+                    <option key={src.id} value={src.id}>
+                      {src.type === 'pdf' ? '📕' : src.type === 'image' ? '🖼️' : '📝'} {src.title}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  নির্দিষ্ট কোনো সোর্স নির্বাচন করলে এই ধারাটি শুধু সেই সোর্স থেকেই তৈরি হবে।
+                </p>
               </div>
 
               <div className="flex items-center space-x-2 pt-1">

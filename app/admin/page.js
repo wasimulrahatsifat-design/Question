@@ -35,6 +35,11 @@ import {
   KeyRound,
   ShieldCheck,
   Sparkles,
+  GraduationCap,
+  ArrowUp,
+  ArrowDown,
+  RotateCcw,
+  X,
 } from 'lucide-react';
 
 import {
@@ -68,6 +73,7 @@ import {
   resetSubjectsForClass,
   loadClassesList,
   saveClassesList,
+  resetClassesListToDefault,
   loadSectionsForSubject,
   saveSectionsForSubject,
   resetSectionsToDefault,
@@ -84,13 +90,23 @@ export default function AdminPage() {
   const [authError, setAuthError] = useState('');
   const [newPasswordInput, setNewPasswordInput] = useState('');
 
-  const [activeTab, setActiveTab] = useState('sources'); // 'sources' | 'supabase' | 'syllabus' | 'security'
+  const [activeTab, setActiveTab] = useState('sources'); // 'sources' | 'supabase' | 'classes_subjects' | 'syllabus' | 'demo_pattern' | 'security'
 
   // Class and Subject state
   const [classesList, setClassesList] = useState([]);
   const [selectedClass, setSelectedClass] = useState('পঞ্চম');
   const [subjectsList, setSubjectsList] = useState([]);
   const [selectedSubject, setSelectedSubject] = useState('বিজ্ঞান');
+
+  // Class & Subject Management dedicated tab state
+  const [selectedManageClass, setSelectedManageClass] = useState('পঞ্চম');
+  const [manageSubjectsList, setManageSubjectsList] = useState([]);
+  const [newClassNameInput, setNewClassNameInput] = useState('');
+  const [editingClassIdx, setEditingClassIdx] = useState(null);
+  const [editingClassName, setEditingClassName] = useState('');
+  const [newSubjectNameInput, setNewSubjectNameInput] = useState('');
+  const [editingSubjectIdx, setEditingSubjectIdx] = useState(null);
+  const [editingSubjectName, setEditingSubjectName] = useState('');
 
   // Filter state for source list
   const [filterClass, setFilterClass] = useState('সকল');
@@ -99,6 +115,7 @@ export default function AdminPage() {
 
   // New Source Form State
   const [sourceType, setSourceType] = useState('pdf'); // 'pdf' | 'image' | 'text'
+  const [storageProvider, setStorageProvider] = useState('supabase'); // 'supabase' | 'uploadthing'
   const [sourceTitle, setSourceTitle] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
   const [textContent, setTextContent] = useState('');
@@ -223,13 +240,216 @@ export default function AdminPage() {
     }
   }, [syllabusClass]);
 
-  // Load syllabus sections when class/subject changes in syllabus tab
+  // Update manage subjects when selectedManageClass changes
   useEffect(() => {
-    if (syllabusClass && syllabusSubject) {
-      const sections = loadSectionsForSubject(syllabusClass, syllabusSubject);
-      setSyllabusSections(JSON.parse(JSON.stringify(sections || [])));
+    if (selectedManageClass) {
+      const subs = loadSubjectsForClass(selectedManageClass);
+      setManageSubjectsList(subs);
+      if (editingSubjectIdx !== null) setEditingSubjectIdx(null);
     }
-  }, [syllabusClass, syllabusSubject]);
+  }, [selectedManageClass]);
+
+  // Sync classes and subjects on external update events
+  useEffect(() => {
+    const handleClassesUpdated = () => {
+      const cls = loadClassesList();
+      setClassesList(cls);
+    };
+    const handleSubjectsUpdated = (e) => {
+      const { className } = e?.detail || {};
+      if (!className || className === selectedManageClass) {
+        setManageSubjectsList(loadSubjectsForClass(selectedManageClass));
+      }
+      if (!className || className === selectedClass) {
+        setSubjectsList(loadSubjectsForClass(selectedClass));
+      }
+    };
+
+    window.addEventListener('exam_classes_updated', handleClassesUpdated);
+    window.addEventListener('exam_subjects_updated', handleSubjectsUpdated);
+    return () => {
+      window.removeEventListener('exam_classes_updated', handleClassesUpdated);
+      window.removeEventListener('exam_subjects_updated', handleSubjectsUpdated);
+    };
+  }, [selectedManageClass, selectedClass]);
+
+  // --- Class Management Handlers ---
+  const handleAddClass = () => {
+    const trimmed = newClassNameInput.trim();
+    if (!trimmed) {
+      showToast('শ্রেণির নাম লিখুন', 'error');
+      return;
+    }
+    if (classesList.includes(trimmed)) {
+      showToast('এই শ্রেণি ইতিমধ্যে তালিকায় রয়েছে', 'error');
+      return;
+    }
+    const updated = [...classesList, trimmed];
+    setClassesList(updated);
+    saveClassesList(updated);
+    setNewClassNameInput('');
+    setSelectedManageClass(trimmed);
+    showToast(`'${trimmed}' শ্রেণি তালিকায় সফলভাবে যুক্ত হয়েছে!`);
+  };
+
+  const handleSaveEditClass = (idx) => {
+    const trimmed = editingClassName.trim();
+    if (!trimmed) {
+      setEditingClassIdx(null);
+      return;
+    }
+    const oldName = classesList[idx];
+    if (oldName === trimmed) {
+      setEditingClassIdx(null);
+      return;
+    }
+    if (classesList.some((c, i) => i !== idx && c === trimmed)) {
+      showToast('এই নামে ইতিমধ্যে অন্য একটি শ্রেণি রয়েছে', 'error');
+      return;
+    }
+
+    const updated = [...classesList];
+    updated[idx] = trimmed;
+    setClassesList(updated);
+    saveClassesList(updated);
+
+    // Migrate existing subjects if any
+    const oldSubs = loadSubjectsForClass(oldName);
+    saveSubjectsForClass(trimmed, oldSubs);
+
+    if (selectedManageClass === oldName) setSelectedManageClass(trimmed);
+    if (selectedClass === oldName) setSelectedClass(trimmed);
+    if (syllabusClass === oldName) setSyllabusClass(trimmed);
+    if (demoClass === oldName) setDemoClass(trimmed);
+
+    setEditingClassIdx(null);
+    showToast(`শ্রেণির নাম পরিবর্তন করে '${trimmed}' রাখা হয়েছে!`);
+  };
+
+  const handleMoveClass = (idx, direction) => {
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= classesList.length) return;
+    const updated = [...classesList];
+    const temp = updated[idx];
+    updated[idx] = updated[targetIdx];
+    updated[targetIdx] = temp;
+    setClassesList(updated);
+    saveClassesList(updated);
+  };
+
+  const handleDeleteClass = (idx) => {
+    const target = classesList[idx];
+    if (classesList.length <= 1) {
+      showToast('কমপক্ষে একটি শ্রেণি তালিকায় থাকতে হবে', 'error');
+      return;
+    }
+    if (confirm(`আপনি কি নিশ্চিতভাবে '${target}' শ্রেণি এবং এর তালিকা মুছে ফেলতে চান?`)) {
+      const updated = classesList.filter((_, i) => i !== idx);
+      setClassesList(updated);
+      saveClassesList(updated);
+      if (selectedManageClass === target) setSelectedManageClass(updated[0]);
+      if (selectedClass === target) setSelectedClass(updated[0]);
+      if (syllabusClass === target) setSyllabusClass(updated[0]);
+      if (demoClass === target) setDemoClass(updated[0]);
+      showToast(`'${target}' শ্রেণি মুছে ফেলা হয়েছে!`);
+    }
+  };
+
+  const handleResetClasses = () => {
+    if (confirm('সকল শ্রেণি জাতীয় স্ট্যান্ডার্ড ডিফল্ট তালিকায় রিসেট করতে চান?')) {
+      const def = resetClassesListToDefault();
+      setClassesList(def);
+      setSelectedManageClass(def[0]);
+      showToast('সকল শ্রেণি ডিফল্টে রিসেট করা হয়েছে!');
+    }
+  };
+
+  // --- Subject Management Handlers ---
+  const handleAddSubjectToClass = () => {
+    const trimmed = newSubjectNameInput.trim();
+    if (!trimmed) {
+      showToast('বিষয়ের নাম লিখুন', 'error');
+      return;
+    }
+    if (manageSubjectsList.includes(trimmed)) {
+      showToast('এই বিষয় ইতিমধ্যে এই শ্রেণির তালিকায় রয়েছে', 'error');
+      return;
+    }
+    const updated = [...manageSubjectsList, trimmed];
+    setManageSubjectsList(updated);
+    saveSubjectsForClass(selectedManageClass, updated);
+    setNewSubjectNameInput('');
+    showToast(`'${trimmed}' বিষয় ${selectedManageClass} শ্রেণিতে যুক্ত হয়েছে!`);
+  };
+
+  const handleSaveEditSubject = (idx) => {
+    const trimmed = editingSubjectName.trim();
+    if (!trimmed) {
+      setEditingSubjectIdx(null);
+      return;
+    }
+    const oldName = manageSubjectsList[idx];
+    if (oldName === trimmed) {
+      setEditingSubjectIdx(null);
+      return;
+    }
+    if (manageSubjectsList.some((s, i) => i !== idx && s === trimmed)) {
+      showToast('এই নামে ইতিমধ্যে অন্য একটি বিষয় রয়েছে', 'error');
+      return;
+    }
+
+    const updated = [...manageSubjectsList];
+    updated[idx] = trimmed;
+    setManageSubjectsList(updated);
+    saveSubjectsForClass(selectedManageClass, updated);
+
+    // Migrate section preset if existing
+    const oldSections = loadSectionsForSubject(selectedManageClass, oldName);
+    if (oldSections && oldSections.length > 0) {
+      saveSectionsForSubject(selectedManageClass, trimmed, oldSections);
+    }
+
+    if (selectedSubject === oldName) setSelectedSubject(trimmed);
+    if (syllabusSubject === oldName) setSyllabusSubject(trimmed);
+    if (demoSubject === oldName) setDemoSubject(trimmed);
+
+    setEditingSubjectIdx(null);
+    showToast(`বিষয়ের নাম পরিবর্তন করে '${trimmed}' রাখা হয়েছে!`);
+  };
+
+  const handleMoveSubject = (idx, direction) => {
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= manageSubjectsList.length) return;
+    const updated = [...manageSubjectsList];
+    const temp = updated[idx];
+    updated[idx] = updated[targetIdx];
+    updated[targetIdx] = temp;
+    setManageSubjectsList(updated);
+    saveSubjectsForClass(selectedManageClass, updated);
+  };
+
+  const handleDeleteSubject = (idx) => {
+    const target = manageSubjectsList[idx];
+    if (manageSubjectsList.length <= 1) {
+      showToast('কমপক্ষে একটি বিষয় তালিকায় থাকতে হবে', 'error');
+      return;
+    }
+    if (confirm(`আপনি কি নিশ্চিতভাবে ${selectedManageClass} শ্রেণি থেকে '${target}' বিষয় মুছে ফেলতে চান?`)) {
+      const updated = manageSubjectsList.filter((_, i) => i !== idx);
+      setManageSubjectsList(updated);
+      saveSubjectsForClass(selectedManageClass, updated);
+      showToast(`'${target}' বিষয় মুছে ফেলা হয়েছে!`);
+    }
+  };
+
+  const handleResetSubjectsForClass = () => {
+    if (confirm(`${selectedManageClass} শ্রেণির বিষয় তালিকা জাতীয় স্ট্যান্ডার্ড ডিফল্টে রিসেট করতে চান?`)) {
+      const def = resetSubjectsForClass(selectedManageClass);
+      setManageSubjectsList(def);
+      showToast(`${selectedManageClass} শ্রেণির বিষয় ডিফল্টে রিসেট করা হয়েছে!`);
+    }
+  };
+
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -341,19 +561,17 @@ export default function AdminPage() {
         file: selectedFile,
         textContent: textContent.trim(),
         pageCount: pdfPageCount,
+        storageProvider: storageProvider,
         onProgress: (percent) => {
-          setUploadProgressMsg(`UploadThing এ আপলোড হচ্ছে... ${percent}%`);
+          const provLabel = storageProvider === 'uploadthing' ? 'UploadThing' : 'Supabase Storage';
+          setUploadProgressMsg(`${provLabel} এ আপলোড হচ্ছে... ${percent}%`);
         },
       });
 
-      if (savedResult?.storageType === 'uploadthing') {
-        showToast(`✅ "${sourceTitle}" UploadThing ক্লাউডে সফলভাবে আপলোড ও সংরক্ষিত হয়েছে!`, 'success');
-      } else if (savedResult?.storageType === 'supabase') {
-        showToast(`✅ "${sourceTitle}" Supabase ক্লাউডে সফলভাবে সংরক্ষিত হয়েছে!`, 'success');
-      } else if (savedResult?.uploadThingError) {
-        showToast(`💾 "${sourceTitle}" লোকাল মেমোরিতে (IndexedDB) সংরক্ষিত হয়েছে`, 'success');
+      if (savedResult?.provider === 'uploadthing') {
+        showToast(`✅ "${sourceTitle}" UploadThing ক্লাউডে আপলোড ও Supabase ডেটাবেজে সংরক্ষিত হয়েছে!`, 'success');
       } else {
-        showToast(`💾 "${sourceTitle}" সফলভাবে সংরক্ষিত হয়েছে!`, 'success');
+        showToast(`✅ "${sourceTitle}" Supabase Storage ও ডেটাবেজে সফলভাবে সংরক্ষিত হয়েছে!`, 'success');
       }
 
       // Reset form
@@ -526,13 +744,13 @@ export default function AdminPage() {
     }
   };
 
-  const handleResetToLocal = () => {
-    if (confirm('আপনি কি Supabase সংযোগ বাদ দিয়ে শুধুমাত্র লোকাল স্টোরেজ ব্যবহার করতে চান?')) {
+  const handleClearSupabaseCreds = () => {
+    if (confirm('আপনি কি Supabase সংযোগ তথ্য মুছে ফেলতে চান?')) {
       saveSupabaseCredentials('', '');
       setSupabaseUrl('');
       setSupabaseAnonKey('');
-      setSupabaseStatus({ tested: true, success: true, message: 'লোকাল IndexedDB মোড সক্রিয় রয়েছে।' });
-      showToast('লোকাল স্টোরেজ মোড সফলভাবে সক্রিয় করা হয়েছে!', 'success');
+      setSupabaseStatus({ tested: false, success: false, message: '' });
+      showToast('Supabase সংযোগ তথ্য মুছে ফেলা হয়েছে।');
       refreshSources();
     }
   };
@@ -849,18 +1067,18 @@ export default function AdminPage() {
               className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold border ${
                 isCloudConnected
                   ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                  : 'bg-blue-50 text-blue-700 border-blue-200'
+                  : 'bg-amber-50 text-amber-700 border-amber-200'
               }`}
             >
               {isCloudConnected ? (
                 <>
                   <Cloud className="w-4 h-4 mr-1.5 text-emerald-600" />
-                  Supabase ক্লাউড সক্রিয়
+                  Supabase ক্লাউড ডেটাবেজ সক্রিয়
                 </>
               ) : (
                 <>
-                  <HardDrive className="w-4 h-4 mr-1.5 text-blue-600" />
-                  লোকাল মেমোরি
+                  <AlertCircle className="w-4 h-4 mr-1.5 text-amber-600" />
+                  Supabase কনফিগারেশন প্রয়োজন
                 </>
               )}
             </div>
@@ -903,6 +1121,18 @@ export default function AdminPage() {
           </button>
 
           <button
+            onClick={() => setActiveTab('classes_subjects')}
+            className={`py-3 px-4 text-sm font-bold border-b-2 flex items-center space-x-2 transition whitespace-nowrap ${
+              activeTab === 'classes_subjects'
+                ? 'border-indigo-600 text-indigo-700 bg-indigo-50/40 font-extrabold'
+                : 'border-transparent text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <GraduationCap className="w-4 h-4" />
+            <span>শ্রেণি ও বিষয় ব্যবস্থাপনা</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('syllabus')}
             className={`py-3 px-4 text-sm font-bold border-b-2 flex items-center space-x-2 transition whitespace-nowrap ${
               activeTab === 'syllabus'
@@ -911,7 +1141,7 @@ export default function AdminPage() {
             }`}
           >
             <Layers className="w-4 h-4" />
-            <span>মানবন্টন ও বিষয় সেটিংস</span>
+            <span>মানবন্টন ও ধারা প্রিসেট</span>
           </button>
 
           <button
@@ -1051,6 +1281,54 @@ export default function AdminPage() {
                       </button>
                     </div>
                   </div>
+
+                  {/* Cloud Storage Provider Selection Toggle (Supabase Storage vs UploadThing) */}
+                  {sourceType !== 'text' && (
+                    <div className="bg-slate-50/80 p-3.5 rounded-xl border border-slate-200 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-xs font-bold text-slate-700 uppercase tracking-wide">
+                          ক্লাউড স্টোরেজ হোস্ট নির্বাচন করুন
+                        </label>
+                        <span className="text-[11px] font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-100">
+                          ১০০% ক্লাউড-হোস্টেড
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setStorageProvider('supabase')}
+                          className={`py-2 px-3 rounded-lg border text-xs font-bold flex items-center justify-center space-x-2 transition ${
+                            storageProvider === 'supabase'
+                              ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs ring-2 ring-emerald-200'
+                              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                          }`}
+                        >
+                          <Database className="w-4 h-4" />
+                          <span>Supabase Storage</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setStorageProvider('uploadthing')}
+                          className={`py-2 px-3 rounded-lg border text-xs font-bold flex items-center justify-center space-x-2 transition ${
+                            storageProvider === 'uploadthing'
+                              ? 'bg-purple-600 text-white border-purple-600 shadow-xs ring-2 ring-purple-200'
+                              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                          }`}
+                        >
+                          <UploadCloud className="w-4 h-4" />
+                          <span>UploadThing</span>
+                        </button>
+                      </div>
+
+                      <p className="text-[11px] text-slate-500">
+                        {storageProvider === 'supabase'
+                          ? '📦 ফাইল Supabase Storage বাকেটে আপলোড হবে এবং লিঙ্ক Supabase ডেটাবেজে সংরক্ষিত হবে।'
+                          : '⚡ ফাইল UploadThing হাই-স্পিড সিডিএন-এ আপলোড হবে এবং লিঙ্ক Supabase ডেটাবেজে সংরক্ষিত হবে।'}
+                      </p>
+                    </div>
+                  )}
 
                   {/* Custom Source Title / Name */}
                   <div>
@@ -1346,10 +1624,28 @@ export default function AdminPage() {
                               <span className="text-slate-500">
                                 • {new Date(src.createdAt).toLocaleDateString('bn-BD')}
                               </span>
-                              {src.storageType === 'supabase' && (
-                                <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
-                                  Cloud
-                                </span>
+                              <span
+                                className={`text-[11px] font-bold px-2 py-0.5 rounded border ${
+                                  src.provider === 'uploadthing' || src.storageType === 'uploadthing'
+                                    ? 'bg-purple-50 text-purple-700 border-purple-200'
+                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                }`}
+                              >
+                                {src.provider === 'uploadthing' || src.storageType === 'uploadthing'
+                                  ? 'UploadThing'
+                                  : 'Supabase Storage'}
+                              </span>
+                              {(src.publicUrl || src.fileUrl) && (
+                                <a
+                                  href={src.publicUrl || src.fileUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 hover:underline inline-flex items-center gap-0.5"
+                                  title="ক্লাউড ফাইল ওপেন করুন"
+                                >
+                                  <span>লিঙ্ক</span>
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
                               )}
                             </div>
 
@@ -1423,24 +1719,24 @@ export default function AdminPage() {
                 className={`p-4 rounded-xl border flex items-start space-x-3 ${
                   isCloudConnected
                     ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
-                    : 'bg-blue-50/70 border-blue-200 text-blue-900'
+                    : 'bg-amber-50/70 border-amber-200 text-amber-900'
                 }`}
               >
                 {isCloudConnected ? (
                   <Check className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
                 ) : (
-                  <HardDrive className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                  <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
                 )}
                 <div className="text-sm space-y-1">
                   <p className="font-bold">
                     {isCloudConnected
-                      ? 'Supabase ক্লাউড স্টোরেজ সফলভাবে সংযুক্ত রয়েছে'
-                      : 'বর্তমানে ব্রাউজারের লোকাল IndexedDB মেমোরি ব্যবহার হচ্ছে'}
+                      ? 'Supabase গ্লোবাল ক্লাউড ডেটাবেজ সফলভাবে সংযুক্ত রয়েছে'
+                      : 'Supabase ক্লাউড ডেটাবেজ কনফিগারেশন প্রয়োজন'}
                   </p>
                   <p className="text-slate-600 leading-relaxed text-sm">
                     {isCloudConnected
-                      ? 'আপনার সমস্ত সোর্স ফাইল Supabase এর ফ্রি ক্লাউডে সংরক্ষিত হচ্ছে। অন্য কম্পিউটার বা ব্রাউজার থেকেও এগুলো পাওয়া যাবে।'
-                      : 'Supabase সংযোগ না থাকলেও সমস্যা নেই; আপনার সমস্ত ফাইল এই ব্রাউজারে সম্পূর্ণ নিরাপদে সংরক্ষিত থাকবে।'}
+                      ? 'আপনার সমস্ত সোর্স বই ও প্রশ্নের মেটাডাটা Supabase গ্লোবাল ডেটাবেজে সংরক্ষিত হচ্ছে। বিশ্বজুড়ে যেকোনো ডিভাইস থেকে সকল ইউজার একই বইয়ের লাইব্রেরি দেখতে পাবে।'
+                      : 'দয়া করে নিচে আপনার Supabase Project URL ও Public Anon Key প্রদান করে কানেকশন সম্পন্ন করুন।'}
                   </p>
                 </div>
               </div>
@@ -1496,10 +1792,10 @@ export default function AdminPage() {
                   {isCloudConnected && (
                     <button
                       type="button"
-                      onClick={handleResetToLocal}
+                      onClick={handleClearSupabaseCreds}
                       className="px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-bold rounded-xl transition"
                     >
-                      সংযোগ বিচ্ছিন্ন করুন (লোকাল মোড)
+                      কানেকশন তথ্য ক্লিয়ার করুন
                     </button>
                   )}
                 </div>
@@ -1566,7 +1862,368 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* TAB 3: Syllabus & Marks Distribution Settings */}
+        {/* TAB: Class and Subject Management */}
+        {activeTab === 'classes_subjects' && (
+          <div className="space-y-6">
+            {/* Header Banner */}
+            <div className="bg-linear-to-r from-indigo-900 via-indigo-800 to-slate-900 rounded-2xl p-6 text-white shadow-md">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div className="flex items-start space-x-3.5">
+                  <div className="p-3 bg-white/10 rounded-xl backdrop-blur-xs border border-white/20">
+                    <GraduationCap className="w-7 h-7 text-indigo-200" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold">শ্রেণি ও বিষয় জাতীয় কারিকুলাম ও কাস্টম সেটিংস</h2>
+                    <p className="text-sm text-indigo-200 mt-1 max-w-3xl leading-relaxed">
+                      সাইটব্যাপী সকল শ্রেণি এবং প্রতি শ্রেণির অধীনে বিষয়সমূহ পরিচালনা করুন। এখানে যেকোনো নতুন শ্রেণি বা বিষয় যোগ, সম্পাদনা, রি-অর্ডার কিংবা ডিলিট করলে তা তাৎক্ষণিকভাবে পুরো সাইটের সকল ড্রপডাউন এবং প্রশ্ন জেনারেটরে স্বয়ংক্রিয়ভাবে সক্রিয় হবে।
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center space-x-2 shrink-0">
+                  <button
+                    onClick={handleResetClasses}
+                    className="px-3.5 py-2 bg-white/10 hover:bg-white/20 text-white text-xs font-semibold rounded-xl border border-white/20 transition flex items-center space-x-1.5"
+                    title="সকল শ্রেণি ডিফল্টে রিসেট করুন"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>ডিফল্ট শ্রেণিতে রিসেট</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-4 pt-4 border-t border-white/10 flex flex-wrap items-center gap-4 text-xs font-medium text-indigo-200">
+                <span className="flex items-center">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 mr-2"></span>
+                  মোট সক্রিয় শ্রেণি: <strong className="text-white ml-1">{toBengaliNumerals(classesList.length)}টি</strong>
+                </span>
+                <span className="flex items-center">
+                  <span className="w-2 h-2 rounded-full bg-indigo-400 mr-2"></span>
+                  নির্বাচিত ({selectedManageClass}) শ্রেণির বিষয়: <strong className="text-white ml-1">{toBengaliNumerals(manageSubjectsList.length)}টি</strong>
+                </span>
+                <span className="text-emerald-300 sm:ml-auto flex items-center font-semibold">
+                  <Check className="w-3.5 h-3.5 mr-1" />
+                  রিয়েল-টাইম সাইটব্যাপী সিঙ্ক সক্রিয়
+                </span>
+              </div>
+            </div>
+
+            {/* Two Column Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* Left Column: Classes Management (5 cols) */}
+              <div className="lg:col-span-5 bg-white rounded-2xl shadow-xs border border-slate-200 p-5 space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <div className="flex items-center space-x-2">
+                    <GraduationCap className="w-5 h-5 text-indigo-600" />
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900">১. শ্রেণি তালিকা ও ক্রম</h3>
+                      <p className="text-xs text-slate-500">শ্রেণি নির্বাচন করে বিষয়সমূহ পরিচালনা করুন</p>
+                    </div>
+                  </div>
+                  <span className="text-xs font-bold bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-full border border-indigo-100">
+                    {toBengaliNumerals(classesList.length)}টি শ্রেণি
+                  </span>
+                </div>
+
+                {/* Add Class Input */}
+                <div className="flex space-x-2">
+                  <input
+                    type="text"
+                    value={newClassNameInput}
+                    onChange={(e) => setNewClassNameInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddClass();
+                      }
+                    }}
+                    placeholder="নতুন শ্রেণির নাম (যেমন: ৬ষ্ঠ, নার্সারি)..."
+                    className="flex-1 text-sm px-3.5 py-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-slate-50"
+                  />
+                  <button
+                    onClick={handleAddClass}
+                    className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition flex items-center space-x-1 shrink-0 shadow-xs"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>যোগ করুন</span>
+                  </button>
+                </div>
+
+                {/* Class List */}
+                <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
+                  {classesList.map((clsName, idx) => {
+                    const isSelected = selectedManageClass === clsName;
+                    const isEditing = editingClassIdx === idx;
+                    const subCount = loadSubjectsForClass(clsName).length;
+
+                    return (
+                      <div
+                        key={clsName || idx}
+                        onClick={() => {
+                          if (!isEditing) setSelectedManageClass(clsName);
+                        }}
+                        className={`p-3 rounded-xl border transition cursor-pointer flex items-center justify-between ${
+                          isSelected
+                            ? 'bg-indigo-50/90 border-indigo-300 ring-2 ring-indigo-500/20'
+                            : 'bg-slate-50/70 hover:bg-slate-100/70 border-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-2.5 flex-1 min-w-0 mr-2">
+                          <span className="text-xs font-bold text-slate-400 w-5 text-right shrink-0">
+                            {toBengaliNumerals(idx + 1)}.
+                          </span>
+
+                          {isEditing ? (
+                            <div className="flex items-center space-x-1.5 flex-1" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="text"
+                                value={editingClassName}
+                                onChange={(e) => setEditingClassName(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') handleSaveEditClass(idx);
+                                  if (e.key === 'Escape') setEditingClassIdx(null);
+                                }}
+                                autoFocus
+                                className="text-xs font-bold px-2 py-1 border border-indigo-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 flex-1"
+                              />
+                              <button
+                                onClick={() => handleSaveEditClass(idx)}
+                                className="p-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition"
+                                title="সেভ করুন"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => setEditingClassIdx(null)}
+                                className="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg transition"
+                                title="বাতিল করুন"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center space-x-2 truncate">
+                              <span className={`text-sm font-bold truncate ${isSelected ? 'text-indigo-950' : 'text-slate-800'}`}>
+                                {clsName} শ্রেণি
+                              </span>
+                              <span className="text-[10px] font-semibold bg-white border border-slate-200 text-slate-500 px-2 py-0.5 rounded-full shrink-0">
+                                {toBengaliNumerals(subCount)}টি বিষয়
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Actions */}
+                        {!isEditing && (
+                          <div className="flex items-center space-x-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              onClick={() => handleMoveClass(idx, 'up')}
+                              disabled={idx === 0}
+                              className="p-1 text-slate-400 hover:text-slate-700 hover:bg-white rounded-md disabled:opacity-30 transition"
+                              title="উপরে নিন"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleMoveClass(idx, 'down')}
+                              disabled={idx === classesList.length - 1}
+                              className="p-1 text-slate-400 hover:text-slate-700 hover:bg-white rounded-md disabled:opacity-30 transition"
+                              title="নিচে নিন"
+                            >
+                              <ArrowDown className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditingClassIdx(idx);
+                                setEditingClassName(clsName);
+                              }}
+                              className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-white rounded-md transition"
+                              title="নাম পরিবর্তন করুন"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteClass(idx)}
+                              className="p-1 text-slate-400 hover:text-rose-600 hover:bg-white rounded-md transition"
+                              title="মুছে ফেলুন"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Right Column: Subjects for Selected Class (7 cols) */}
+              <div className="lg:col-span-7 bg-white rounded-2xl shadow-xs border border-slate-200 p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-100 pb-3 gap-2">
+                  <div className="flex items-center space-x-2">
+                    <BookOpen className="w-5 h-5 text-indigo-600" />
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900">
+                        ২. বিষয় তালিকা ({selectedManageClass} শ্রেণি)
+                      </h3>
+                      <p className="text-xs text-slate-500">এই শ্রেণির অন্তর্ভুক্ত বিষয়সমূহ সাজান বা নতুন যোগ করুন</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <select
+                      value={selectedManageClass}
+                      onChange={(e) => setSelectedManageClass(e.target.value)}
+                      className="text-xs font-bold px-3 py-1.5 border border-indigo-200 rounded-lg bg-indigo-50 text-indigo-900 focus:outline-none"
+                    >
+                      {classesList.map((c) => (
+                        <option key={c} value={c}>
+                          {c} শ্রেণি
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      onClick={handleResetSubjectsForClass}
+                      className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition flex items-center space-x-1"
+                      title="এই শ্রেণির বিষয় তালিকা ডিফল্টে রিসেট করুন"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>ডিফল্ট বিষয়</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Add Subject Input */}
+                <div className="flex space-x-2">
+                  <input
+                    type="text"
+                    value={newSubjectNameInput}
+                    onChange={(e) => setNewSubjectNameInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddSubjectToClass();
+                      }
+                    }}
+                    placeholder={`নতুন বিষয়ের নাম (যেমন: ইসলাম ও নৈতিক শিক্ষা, চারুপাঠ)...`}
+                    className="flex-1 text-sm px-3.5 py-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-slate-50"
+                  />
+                  <button
+                    onClick={handleAddSubjectToClass}
+                    className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition flex items-center space-x-1 shrink-0 shadow-xs"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>বিষয় যোগ করুন</span>
+                  </button>
+                </div>
+
+                {/* Subjects List */}
+                <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
+                  {manageSubjectsList.length === 0 ? (
+                    <div className="text-center py-10 text-slate-400 text-sm">
+                      এই শ্রেণির জন্য কোনো বিষয় যোগ করা হয়নি। উপরে বিষয়ের নাম লিখে যোগ করুন।
+                    </div>
+                  ) : (
+                    manageSubjectsList.map((subName, idx) => {
+                      const isEditing = editingSubjectIdx === idx;
+
+                      return (
+                        <div
+                          key={subName || idx}
+                          className="p-3 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-slate-100/70 transition flex items-center justify-between"
+                        >
+                          <div className="flex items-center space-x-2.5 flex-1 min-w-0 mr-2">
+                            <span className="text-xs font-bold text-slate-400 w-5 text-right shrink-0">
+                              {toBengaliNumerals(idx + 1)}.
+                            </span>
+
+                            {isEditing ? (
+                              <div className="flex items-center space-x-1.5 flex-1">
+                                <input
+                                  type="text"
+                                  value={editingSubjectName}
+                                  onChange={(e) => setEditingSubjectName(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleSaveEditSubject(idx);
+                                    if (e.key === 'Escape') setEditingSubjectIdx(null);
+                                  }}
+                                  autoFocus
+                                  className="text-xs font-bold px-2 py-1 border border-indigo-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 flex-1"
+                                />
+                                <button
+                                  onClick={() => handleSaveEditSubject(idx)}
+                                  className="p-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition"
+                                  title="সেভ করুন"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => setEditingSubjectIdx(null)}
+                                  className="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg transition"
+                                  title="বাতিল করুন"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center space-x-2 truncate">
+                                <span className="text-sm font-bold text-slate-800 truncate">
+                                  {subName}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Actions */}
+                          {!isEditing && (
+                            <div className="flex items-center space-x-1 shrink-0">
+                              <button
+                                onClick={() => handleMoveSubject(idx, 'up')}
+                                disabled={idx === 0}
+                                className="p-1 text-slate-400 hover:text-slate-700 hover:bg-white rounded-md disabled:opacity-30 transition"
+                                title="উপরে নিন"
+                              >
+                                <ArrowUp className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleMoveSubject(idx, 'down')}
+                                disabled={idx === manageSubjectsList.length - 1}
+                                className="p-1 text-slate-400 hover:text-slate-700 hover:bg-white rounded-md disabled:opacity-30 transition"
+                                title="নিচে নিন"
+                              >
+                                <ArrowDown className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setEditingSubjectIdx(idx);
+                                  setEditingSubjectName(subName);
+                                }}
+                                className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-white rounded-md transition"
+                                title="নাম পরিবর্তন করুন"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteSubject(idx)}
+                                className="p-1 text-slate-400 hover:text-rose-600 hover:bg-white rounded-md transition"
+                                title="মুছে ফেলুন"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 4: Syllabus & Marks Distribution Settings */}
         {activeTab === 'syllabus' && (
           <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-6 space-y-6">
             <div className="border-b border-slate-100 pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1728,6 +2385,35 @@ export default function AdminPage() {
                           >
                             মুছে ফেলুন
                           </button>
+                        </div>
+
+                        {/* Specific Source Assignment for this Section */}
+                        <div className="sm:col-span-12 flex flex-col sm:flex-row sm:items-center gap-2 pt-2 border-t border-slate-200/60">
+                          <label className="text-xs font-bold text-slate-600 shrink-0 flex items-center">
+                            <BookOpen className="w-3.5 h-3.5 mr-1.5 text-indigo-600" />
+                            নির্দিষ্ট সোর্স (ঐচ্ছিক):
+                          </label>
+                          <select
+                            value={sec.sourceId || ''}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              const updated = [...syllabusSections];
+                              updated[idx].sourceId = val || null;
+                              const match = sources.find((s) => s.id === val);
+                              updated[idx].sourceTitle = match ? match.title : null;
+                              setSyllabusSections(updated);
+                            }}
+                            className="text-xs px-3 py-1.5 border border-slate-300 rounded-lg bg-white font-medium flex-1 text-slate-800"
+                          >
+                            <option value="">📁 মেইন সিলেক্টেড সোর্সসমূহ (ডিফল্ট)</option>
+                            {sources
+                              .filter((s) => (s.className === syllabusClass || s.className === 'সকল') && (s.subject === syllabusSubject || s.subject === 'সকল'))
+                              .map((src) => (
+                                <option key={src.id} value={src.id}>
+                                  {src.type === 'pdf' ? '📕' : src.type === 'image' ? '🖼️' : '📝'} {src.title}
+                                </option>
+                              ))}
+                          </select>
                         </div>
                       </div>
                     </div>
