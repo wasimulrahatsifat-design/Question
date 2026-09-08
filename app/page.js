@@ -618,15 +618,88 @@ export default function PdfQuestionGeneratorPage() {
         setStatusMessage(msg);
       });
 
-      setStatusMessage(`Gemini AI দ্বারা ${images.length}টি চিত্র ও ${textSources.length}টি নোটের তথ্য বিশ্লেষণ করে প্রশ্ন তৈরি হচ্ছে...`);
+      let fullExtractedText = '';
 
-      // Step 2: Send Base64 images and text sources to API route
+      // ==========================================
+      // PHASE 1: Text Extraction (Chunked Map)
+      // ==========================================
+      if (images && images.length > 0) {
+        const CHUNK_SIZE = 3;
+        const chunks = [];
+        for (let i = 0; i < images.length; i += CHUNK_SIZE) {
+          const chunkImages = images.slice(i, i + CHUNK_SIZE);
+          chunks.push({
+            chunkImages,
+            startPage: i + 1,
+            endPage: Math.min(i + CHUNK_SIZE, images.length),
+          });
+        }
+
+        const totalChunks = chunks.length;
+        let chunkIdx = 0;
+
+        for (const chunk of chunks) {
+          chunkIdx++;
+          const { chunkImages, startPage, endPage } = chunk;
+
+          // Rate Limit Protection: 3-second delay between chunk requests
+          if (chunkIdx > 1) {
+            setStatusMessage(`রেট লিমিট বিরতি: পরবর্তী ব্যাচের জন্য ৩ সেকেন্ড অপেক্ষা করা হচ্ছে (${chunkIdx}/${totalChunks})...`);
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+
+          // Progress UI: Update status with current chunk and page range
+          setStatusMessage(`Extracting text from pages ${startPage}-${endPage} (${chunkIdx}/${totalChunks})... Please wait`);
+
+          try {
+            const extractRes = await fetch('/api/extract-text', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                images: chunkImages,
+                language,
+                apiKey: userApiKey ? userApiKey.trim() : undefined,
+              }),
+            });
+
+            const extractResult = await extractRes.json();
+
+            if (!extractRes.ok) {
+              throw new Error(extractResult.error || `Failed to extract text from pages ${startPage}-${endPage}.`);
+            }
+
+            if (extractResult.text) {
+              fullExtractedText += `\n\n--- [পাঠ্যবইয়ের পৃষ্ঠা ${startPage}-${endPage} এর টেক্সট] ---\n` + extractResult.text.trim();
+            }
+          } catch (chunkErr) {
+            console.error(`Error extracting text from chunk ${chunkIdx} (pages ${startPage}-${endPage}):`, chunkErr);
+            const errorMsg = chunkErr instanceof Error ? chunkErr.message : String(chunkErr);
+            alert(`সতর্কতা: পৃষ্ঠা ${startPage}-${endPage} এর টেক্সট উত্তোলনে সমস্যা হয়েছে: ${errorMsg}\nঅন্যান্য পৃষ্ঠা থেকে কাজ অব্যাহত রাখা হচ্ছে...`);
+          }
+        }
+      }
+
+      // Append text note sources to extracted text
+      if (textSources && textSources.length > 0) {
+        textSources.forEach((t, idx) => {
+          fullExtractedText += `\n\n--- [সংযুক্ত নোট/সোর্স ${idx + 1}: ${t.title || 'নোট'}] ---\n` + (t.text || '');
+        });
+      }
+
+      if (!fullExtractedText.trim()) {
+        throw new Error('সোর্স থেকে কোনো টেক্সট বা বিষয়বস্তু উত্তোলন করা সম্ভব হয়নি। অনুগ্রহ করে সোর্স চেক করুন।');
+      }
+
+      // ==========================================
+      // PHASE 2: Final Question Generation (Single Request)
+      // ==========================================
+      setStatusMessage('Analyzing whole text and generating final questions...');
+
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          images,
-          textSources,
+          fullExtractedText: fullExtractedText.trim(),
           className: selectedClass,
           subject: selectedSubject,
           requestedSections: activeSections,
@@ -638,7 +711,7 @@ export default function PdfQuestionGeneratorPage() {
       const result = await res.json();
 
       if (!res.ok) {
-        throw new Error(result.error || 'Server failed to generate questions.');
+        throw new Error(result.error || 'Server failed to generate questions from extracted text.');
       }
 
       // Clean prefix duplicates from AI output

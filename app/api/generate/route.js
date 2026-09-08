@@ -5,7 +5,17 @@ import { extractAndParseJson } from '@/lib/jsonHelper';
 export async function POST(req) {
   try {
     const body = await req.json();
-    const { images = [], textSources = [], className, subject, requestedSections, customInstructions, language = 'bn', apiKey: customApiKey } = body;
+    const { 
+      fullExtractedText = '',
+      images = [], 
+      textSources = [], 
+      className, 
+      subject, 
+      requestedSections, 
+      customInstructions, 
+      language = 'bn', 
+      apiKey: customApiKey 
+    } = body;
 
     const apiKey = (customApiKey && customApiKey.trim()) || process.env.GEMINI_API_KEY;
 
@@ -18,19 +28,20 @@ export async function POST(req) {
       );
     }
 
+    const hasExtractedText = Boolean(fullExtractedText && fullExtractedText.trim());
     const hasImages = Array.isArray(images) && images.length > 0;
     const hasTexts = Array.isArray(textSources) && textSources.length > 0;
 
-    if (!hasImages && !hasTexts) {
+    if (!hasExtractedText && !hasImages && !hasTexts) {
       return NextResponse.json(
-        { error: 'প্রশ্নপত্র তৈরির জন্য কোনো সোর্স (ছবি, পিডিএফ বা টেক্সট) পাওয়া যায়নি।' },
+        { error: 'প্রশ্নপত্র তৈরির জন্য কোনো সোর্স (নিষ্কাশিত টেক্সট, ছবি বা নোট) পাওয়া যায়নি।' },
         { status: 400 }
       );
     }
 
     const ai = new GoogleGenAI({ apiKey });
 
-    // Format base64 images as Google Gen AI inline parts with clear source labels
+    // Format base64 images as Google Gen AI inline parts with clear source labels (if provided)
     const imageParts = [];
     if (hasImages) {
       images.forEach((img, idx) => {
@@ -44,6 +55,11 @@ export async function POST(req) {
           },
         });
       });
+    }
+
+    let extractedTextBlock = '';
+    if (hasExtractedText) {
+      extractedTextBlock = `\n\n📌 পাঠ্যবই / সোর্স থেকে সংগৃহীত সম্পূর্ণ টেক্সট (EXTRACTED SOURCE TEXT CONTENT):\n${fullExtractedText.trim()}\n`;
     }
 
     let textSourcesBlock = '';
@@ -64,12 +80,36 @@ export async function POST(req) {
         }).join('\n') + '\n';
     }
 
-    const fullSourcesBlock = textSourcesBlock + sectionSourceBlock;
+    const fullSourcesBlock = extractedTextBlock + textSourcesBlock + sectionSourceBlock;
 
     // Dedicated, isolated prompt builder function per subject & class
     function buildSubjectPrompt(subjectName, classNameStr, reqSections, sourcesBlock, customInst) {
       const sub = (subjectName || '').toLowerCase().trim();
       const cls = classNameStr || 'পঞ্চম';
+
+      const universalRules = `
+⚠️ অতি গুরুত্বপূর্ণ সার্বজনীন নির্দেশনা (TOP PRIORITY RULES FOR QUESTION CREATION):
+
+১. বইয়ের অনুশীলনী ও বিদ্যমান প্রশ্নের ১০০% সর্বোচ্চ অগ্রাধিকার (STRICT 100% TEXTBOOK EXERCISE PRIORITY):
+   - সোর্সে সংযুক্ত অধ্যায়গুলোর ভেতরে থাকা অনুশীলনী (Exercises), সংক্ষিপ্ত প্রশ্ন (Short Questions), কাঠামোবদ্ধ প্রশ্ন (Structured Questions) এবং পাঠ্যবইয়ের বিদ্যমান সকল প্রশ্নাবলী থেকেই ১০০% প্রশ্ন নির্বাচন করতে হবে।
+   - **অধ্যায়গুলোর মধ্যে প্রশ্নের সুষম বণ্টন নীতি (Chapter Question Distribution):**
+     * যদি কোনো সেকশনে ৫টি প্রশ্ন প্রয়োজন হয় কিন্তু সোর্সে ৪টি অধ্যায় থাকে, তবে প্রতিটি অধ্যায় থেকে ১টি করে প্রশ্ন নেওয়ার পর ৫ম প্রশ্নটি অবশ্যই ঐ ৪টি অধ্যায়ের যেকোনো একটির অনুশীলনীতে থাকা অন্য কোনো প্রশ্ন থেকে নিতে হবে।
+     * কখনোই নিজে থেকে বা প্যারাগ্রাফের ভেতর থেকে মনগড়া/কৃত্রিম নতুন প্রশ্ন তৈরি করবেন না, কারণ অধ্যায়গুলোতে প্রচুর অনুশীলনী প্রশ্ন বিদ্যমান রয়েছে।
+     * প্রতিটি অধ্যায়ের অনুশীলনী থেকে প্রশ্ন নেওয়ার পরও যদি আরও প্রশ্নের প্রয়োজন হয়, তবে যে অধ্যায়ে একাধিক অনুশীলনী প্রশ্ন রয়েছে সেখান থেকে অতিরিক্ত প্রশ্ন বাছাই করে মোট চাহিদা পূরণ করুন।
+     * শুধুমাত্র এবং কেবলমাত্র যদি সবকটি অধ্যায়ের অনুশীলনী প্রশ্ন মিলিয়েও মোট সংখ্যা পূরণ না হয় (অর্থাৎ অনুশীলনীতে আর কোনো প্রশ্নই অবশিষ্ট নেই), কেবল তখনই সোর্সের টেক্সট থেকে বইয়ের আদলে অতিরিক্ত প্রশ্ন তৈরি করতে পারেন। অন্যথায় ১০০% প্রশ্ন বইয়ের অনুশীলনী থেকেই হতে হবে।
+
+২. নম্বর (marksPerQuestion) অনুযায়ী প্রশ্নের পরিধি ও উপযুক্ত রূপান্তর (MARKS-APPROPRIATE QUESTION ADAPTATION):
+   - প্রতিটি সেকশনের নির্ধারিত 'marksPerQuestion' গভীরভাবে লক্ষ্য করুন এবং নম্বর অনুযায়ী প্রশ্নের গভীরতা ঠিক করুন:
+   * ৩ নম্বরের প্রশ্নের ক্ষেত্রে (marksPerQuestion = 3):
+     - প্রশ্নটি অবশ্যই পূর্ণাঙ্গ ৩ নম্বরের মানের উপযোগী হতে হবে।
+     - **২ টির জায়গায় ৩ টি জানতে চাওয়া বাধ্যতামূলক:** যদি বইয়ের মূল প্রশ্নে "২টি উদ্ভিদের নাম / ২টি বৈশিষ্ট্য / ২টি কারণ / ২টি উপায় / ২টি ফলাফল" থাকে, তবে ৩ নম্বরের মান বজায় রাখতে সেটিকে অবশ্যই রূপান্তর করে "৩টি উদ্ভিদের নাম লিখ / ৩টি বৈশিষ্ট্য লিখ / ৩টি কারণ লিখ / ৩টি উপায় লিখ" হিসেবে দিন (বইয়ে ২টির কথা বলা থাকলেও ৩ নম্বরের জন্য অবশ্যই ৩টি করে দিতে হবে)।
+     - **১ নম্বরের অতি-ছোট প্রশ্ন রূপান্তর:** যদি বইয়ের সংক্ষিপ্ত প্রশ্নটি ১ নম্বরের মতো অতি-ছোট হয় (যেমন: "GPS এর পূর্ণরূপ কী?"), তবে ৩ নম্বরের মান বজায় রাখতে সেটির সাথে প্রাসঙ্গিক অংশ যুক্ত করে দিন (যেমন: "GPS এর পূর্ণরূপ কী? এর ২টি ব্যবহার লিখ।") অথবা ৩ নম্বরের জন্য উপযুক্ত পয়েন্টভিত্তিক প্রশ্ন প্রস্তুত করুন।
+     - উত্তরমালায় (answer) স্পষ্ট ৩টি পয়েন্ট বা পূর্ণাঙ্গ ৩ নম্বরের বিস্তারিত সমাধান থাকতে হবে।
+   * ১ বা ২ নম্বরের প্রশ্নের ক্ষেত্রে (marksPerQuestion = 1 or 2):
+     - সংক্ষিপ্ত ১-২টি তথ্য, সংজ্ঞা বা ২টি উপাদান লিখতে বলুন।
+   * ৪ বা ৫ নম্বরের বর্ণনামূলক/কাঠামোবদ্ধ প্রশ্নের ক্ষেত্রে (marksPerQuestion >= 4):
+     - গভীর যোগ্যতাভিত্তিক কাঠামোবদ্ধ প্রশ্ন (যেমন: "সংজ্ঞা দাও? এর ৩টি প্রভাব ও ২টি প্রতিকার লিখ।") দিন এবং পয়েন্টভিত্তিক বিস্তারিত উত্তর প্রস্তুত করুন।
+`;
 
       // 1. ENGLISH (ক্যাডেট ও জাতীয় শিক্ষাক্রম ১০০ নম্বরের পূর্ণাঙ্গ মডেল)
       if (sub.includes('ইংরেজি') || sub.includes('english')) {
@@ -77,8 +117,10 @@ export async function POST(req) {
 Target: Class: ${cls}, Subject: ${subjectName || 'English'}.
 Language: Clean, grammatical, school-level English.
 
+${universalRules}
+
 Your Task:
-1. Extract relevant vocabulary, reading comprehension sentences, themes, and grammar items directly from the attached textbook images and source notes.${sourcesBlock}
+1. Extract relevant vocabulary, reading comprehension sentences, themes, and grammar items directly from the attached textbook text and source notes.${sourcesBlock}
 2. Strictly follow the list of "requestedSections" and respect each section's 'count' property. Exactly create 'count' items for each section.
 
 Detailed Rules for English Question Paper Sections:
@@ -99,30 +141,30 @@ Detailed Rules for English Question Paper Sections:
   In 'answer', provide a well-written, 5-8 sentence standard model composition.
 
 - "Answer the following question" / "en_questions" / "Short Questions" (SECTION 5):
-  CRITICAL: This section contains 4 short comprehension questions based on the reading passage. DO NOT MAKE THIS A MATCHING TABLE.
-  In 'questionText', write a clear comprehension question based on the reading text (e.g. "Where is the Sundarbans located?", "Why do people in Indonesia love going to the beach?", "Why is it important to protect the Sundarbans?", "What animals live in the forest?").
+  CRITICAL: This section contains short comprehension questions based on the reading passage. DO NOT MAKE THIS A MATCHING TABLE.
+  Make sure questions match their marks weight (e.g. for 3 marks, ask for 3 points/reasons/examples).
+  In 'questionText', write a clear comprehension question based on the reading text.
   In 'answer', provide a complete, grammatically sound model answer sentence.
 
 - "Make Sentence" / "en_make_sentence":
-  In 'questionText', provide ONLY the single word (e.g. "Sundarbans", "Famous", "Island", "Train", "Excited").
-  In 'answer', provide format "Word- Meaningful sentence" (e.g. "Famous- Cox's Bazar is a famous tourist spot.").
+  In 'questionText', provide ONLY the single word.
+  In 'answer', provide format "Word- Meaningful sentence".
 
 - "Translate into Bengali" / "en_translate" (SECTION 7):
-  CRITICAL: DO NOT LEAVE THIS EMPTY. Provide exactly 4 English sentences to translate into Bengali.
-  In 'questionText', provide a natural English sentence from the lesson (e.g. "Today is the annual sports day at Sumon's school.", "The school field is decorated with colourful flags.", "The Sundarbans is a great mangrove forest.", "We must protect wild animals.").
-  In 'answer', provide accurate, standard Bengali translation (e.g. "আজ সুমনের বিদ্যালয়ে বার্ষিক ক্রীড়া দিবস।").
+  Provide natural English sentences from the lesson.
+  In 'answer', provide accurate, standard Bengali translation.
 
 - "Rearrange words in the correct order" / "en_rearrange":
-  In 'questionText', provide jumbled words separated by slashes '/' ending with punctuation (e.g. "school/from/started/they/at/9 am.", "guide/ greeted/ the/ museum/ at/ them", "songs/ sang/ together/ they").
-  In 'answer', provide the correctly arranged meaningful sentence (e.g. "They started from school at 9 am.").
+  In 'questionText', provide jumbled words separated by slashes '/' ending with punctuation.
+  In 'answer', provide the correctly arranged meaningful sentence.
 
 - "Use capital letters and punctuation marks" / "en_punctuation":
-  In 'questionText', provide a short 2-3 line continuous paragraph from the reading text in ALL LOWERCASE without any capital letters, commas, or full stops (e.g. "good morning everyone welcome to our annual sports day i have an important announcement for you please listen carefully and follow the instructions.").
+  In 'questionText', provide a short 2-3 line continuous paragraph from the reading text in ALL LOWERCASE without any capital letters, commas, or full stops.
   In 'answer', provide the complete paragraph with accurate capitalization and punctuation marks.
 
 - "Match column A with column B" / "en_match" (SECTION 10):
-  In 'questionText', provide Column A phrase/word (e.g. "protect", "wildlife", "heritage", "erosion", "livelihood").
-  In 'answer', provide matching Column B definition/phrase (e.g. "keep safe", "forest animals", "valuable tradition", "wearing away", "way of living").
+  In 'questionText', provide Column A phrase/word.
+  In 'answer', provide matching Column B definition/phrase.
 
 Requested Sections List & Count:
 ${JSON.stringify(reqSections, null, 2)}
@@ -138,8 +180,10 @@ Output MUST strictly follow the JSON schema.`;
 টার্গেট: শ্রেণি: ${cls}, বিষয়: ${subjectName || 'বাংলা ১ম পত্র'}।
 ভাষা: বিশুদ্ধ প্রমিত বাংলা।
 
+${universalRules}
+
 আপনার দায়িত্ব:
-1. সংযুক্ত পাঠ্যবইয়ের অধ্যায়ের ছবি ও টেক্সট সোর্সগুলো থেকে সরাসরি মূল তথ্য ও বিষয়বস্তু গ্রহণ করে প্রশ্নপত্র তৈরি করুন।${sourcesBlock}
+1. সংযুক্ত পাঠ্যবইয়ের অধ্যায়ের অনুশীলনী ও টেক্সট সোর্সগুলো থেকে সরাসরি মূল প্রশ্ন ও বিষয়বস্তু গ্রহণ করে প্রশ্নপত্র তৈরি করুন।${sourcesBlock}
 2. প্রতিটি সেকশনের questions array-তে অবশ্যই ঠিক 'count' সংখ্যক প্রশ্ন তৈরি করতে হবে।
 
 বাংলা প্রশ্নপত্রের সেকশনভিত্তিক সুনির্দিষ্ট নিয়ম:
@@ -148,8 +192,8 @@ Output MUST strictly follow the JSON schema.`;
 - "কবিতা সংক্রান্ত প্রশ্ন" (bn_poem): 'questionText' এ সোর্সের কবিতার নাম কোটেশনে যুক্ত করে প্রশ্নটি লিখুন, যেমন: "“সংকল্প” কবিতা লিখ কবির নামসহ ১ম ৮ লাইন।" 'answer' খালি রাখুন।
 - "শূন্যস্থান পূরণ কর" (bn_fib): প্রতিটি প্রশ্নে 'questionText' এ বাক্যের মধ্যে "_______" দিন এবং 'answer' এ মূল শব্দটি দিন।
 - "বিরাম চিহ্ন বসাও" (bn_punctuation): 'questionText' এ সোর্সের গল্প থেকে সরাসরি ২-৩ লাইনের যতিচিহ্নহীন অনুচ্ছেদ দিন। 'answer' এ বিরামচিহ্নসহ পূর্ণাঙ্গ অনুচ্ছেদ দিন।
-- "নিচের প্রশ্ন গুলোর উত্তর দাও" / "সংক্ষেপে উত্তর লিখ" (bn_qa): পাঠভিত্তিক স্পষ্ট প্রশ্ন ও নির্ভুল উত্তর দিন।
-- "যুক্তবর্ণ বিভাজন করে ২টি শব্দ গঠন কর" (bn_conjunct): 'questionText' এ মূল যুক্তবর্ণ (যেমন: "জ্ঞ", "ক্ষ", "ন্ধ") থাকবে। 'answer' এ "ন্ধ= ন + ধ (গন্ধ, বান্ধব)" ফরম্যাটে বিভাজন ও শব্দ থাকবে।
+- "নিচের প্রশ্ন গুলোর উত্তর দাও" / "সংক্ষেপে উত্তর লিখ" (bn_qa): পাঠভিত্তিক স্পষ্ট প্রশ্ন ও নির্ভুল উত্তর দিন। ৩ নম্বরের প্রশ্ন হলে অবশ্যই ৩ নম্বরের উপযোগী প্রশ্ন ও উত্তর দিন।
+- "যুক্তবর্ণ বিভাজন করে ২টি শব্দ গঠন কর" (bn_conjunct): 'questionText' এ মূল যুক্তবর্ণ থাকবে। 'answer' এ "ন্ধ= ন + ধ (গন্ধ, বান্ধব)" ফরম্যাটে বিভাজন ও শব্দ থাকবে।
 - "বর্ণনামূলক প্রশ্নের উত্তর দাও" (bn_desc): গভীর ও বর্ণনামূলক প্রশ্ন এবং বিস্তারিত আদর্শ উত্তর দিন।
 - "সত্য-মিথ্যা নির্ণয় কর" (bn_tf): বাক্য দিন এবং 'answer' এ "সত্য" বা "মিথ্যা" লিখুন।
 - "বামপাশের সাথে ডানপাশের মিল কর" (bn_match): 'questionText' এ বামপাশের অংশ এবং 'answer' এ ডানপাশের অংশ দিন।
@@ -167,12 +211,14 @@ ${customInst ? `শিক্ষকের নির্দেশনা: ${customIn
 টার্গেট: শ্রেণি: ${cls}, বিষয়: ${subjectName || 'বাংলা ২য় পত্র'}।
 ভাষা: বিশুদ্ধ প্রমিত বাংলা।
 
+${universalRules}
+
 আপনার দায়িত্ব:
-1. সংযুক্ত পাঠ্যবই বা ব্যাকরণ অধ্যায়ের তথ্য অনুযায়ী প্রশ্নপত্র তৈরি করুন।${sourcesBlock}
+1. সংযুক্ত পাঠ্যবই বা ব্যাকরণ অধ্যায়ের অনুশীলনী ও তথ্যের ভিত্তিতে প্রশ্নপত্র তৈরি করুন।${sourcesBlock}
 2. প্রতিটি সেকশনের নির্ধারিত 'count' অনুযায়ী প্রশ্ন ও উত্তর প্রস্তুত করুন।
 
 বাংলা ২য় পত্রের সেকশনভিত্তিক নিয়ম:
-- "ব্যাকরণ সম্পর্কিত প্রশ্নের উত্তর দাও" (bn2_grammar): ব্যাকরণ বিষয়ক ৩টি তথ্যবহুল প্রশ্ন (যেমন: ভাষা, পদ, বা সন্ধি) ও পূর্ণাঙ্গ উত্তর দিন।
+- "ব্যাকরণ সম্পর্কিত প্রশ্নের উত্তর দাও" (bn2_grammar): ব্যাকরণ বিষয়ক তথ্যবহুল প্রশ্ন ও পূর্ণাঙ্গ উত্তর দিন।
 - "বিপরীত শব্দ লিখ" (bn2_opposite): 'questionText' এ মূল শব্দ দিন, 'answer' এ "মূলশব্দ - বিপরীতশব্দ" দিন।
 - "এক কথায় প্রকাশ কর" (bn2_one_word): 'questionText' এ বাক্য/বাক্যাংশ দিন, 'answer' এ এক কথাটি দিন।
 - "সমার্থক শব্দ লিখ" (bn2_synonym): 'questionText' এ মূল শব্দ দিন, 'answer' এ সমার্থক শব্দ দিন।
@@ -186,75 +232,34 @@ ${customInst ? `শিক্ষকের নির্দেশনা: ${customIn
 আউটপুট অবশ্যই JSON স্কিমায় দিন।`;
       }
 
-      // 4. MATHEMATICS / প্রাথমিক গণিত (পঞ্চম শ্রেণির আদর্শ ১০০ নম্বরের পূর্ণাঙ্গ গণিত প্রশ্নপত্র)
+      // 4. MATHEMATICS / প্রাথমিক গণিত
       if (sub.includes('গণিত') || sub.includes('math')) {
         return `আপনি একজন অভিজ্ঞ প্রাথমিক ও কিন্ডারগার্টেন গণিত শিক্ষক এবং পঞ্চম শ্রেণির জাতীয় শিক্ষাক্রম (NCTB) অনুযায়ী গণিত প্রশ্নপত্র প্রণেতা।
 টার্গেট: শ্রেণি: ${cls}, বিষয়: ${subjectName || 'প্রাথমিক গণিত'}।
 ভাষা: বাংলা এবং বাংলা গাণিতিক সংখ্যা (যেমন: ০, ১, ২, ৩, ৪, ৫, ৬, ৭, ৮, ৯)।
 
+${universalRules}
+
 গুরুত্বপূর্ণ উৎস সংক্রান্ত নিয়ম (SOURCE HANDLING RULES):
-১. সাধারণ ও মূল গণিত প্রশ্নগুলো (১ নং, ৩ নং, ৪ নং, ৫ নং, এবং ৬ থেকে ৯ নং) সংযুক্ত পাঠ্যবইয়ের নির্বাচিত অধ্যায়ের অনুশীলনী, ধারণাসমূহ ও সমস্যা থেকে তৈরি করতে হবে।${sourcesBlock}
-২. জ্যামিতি সংক্রান্ত প্রশ্নগুলো (২ নং শূন্যস্থান পূরণ এবং ১০ নং জ্যামিতি প্রশ্ন): এগুলো গণিত বইয়ের সাধারণ পিডিএফ থেকে হবে না। সংযুক্ত জ্যামিতি বইয়ের ছবি/সোর্স থেকে সরাসরি নিতে হবে।
+১. সাধারণ ও মূল গণিত প্রশ্নগুলো (১ নং, ৩ নং, ৪ নং, ৫ নং, এবং ৬ থেকে ৯ নং) সংযুক্ত পাঠ্যবইয়ের নির্বাচিত অধ্যায়ের অনুশীলনী, ধারণাসমূহ ও সমস্যা থেকে সরাসরি নিতে হবে।${sourcesBlock}
+২. জ্যামিতি সংক্রান্ত প্রশ্নগুলো (২ নং শূন্যস্থান পূরণ এবং ১০ নং জ্যামিতি প্রশ্ন): সংযুক্ত জ্যামিতি বইয়ের ছবি/সোর্স থেকে সরাসরি নিতে হবে।
 ৩. প্রতিটি সেকশনের questions array-তে ঠিক নির্ধারিত 'count' সংখ্যক প্রশ্ন ও নির্ভুল গাণিতিক সমাধান তৈরি করতে হবে।
 
 গণিত প্রশ্নপত্রের ১০টি সেকশনের সুনির্দিষ্ট গঠন ও নিয়মাবলী:
-
 ১. "সংক্ষেপে প্রশ্নের উত্তর দাও" / "সংক্ষেপে উত্তর লিখ" (math_short) [১০টি প্রশ্ন]:
-   - ব্যবহারকারীর নির্বাচিত অধ্যায়গুলো (যেমন: গুণ, ভাগ, চার প্রক্রিয়া, লসাগু-গসাগু, ভগ্নাংশ, দশমিক, গড়, শতকরা, পরিমাপ বা সময়) থেকে ১০টি সংক্ষিপ্ত প্রশ্ন।
-   - প্রশ্নগুলো এক কথায় বা ১-২ লাইনে উত্তরযোগ্য হবে (যেমন: "২৪ এর মৌলিক গুণনীয়কগুলো কী কী?", "প্রকৃত ভগ্নাংশ কাকে বলে?", "এক শতাব্দী সমান কত বছর?", "গড় নির্ণয়ের সূত্রটি লিখ।", "১ হেক্টরে কত বর্গমিটার?")।
-   - 'questionText' এ সংক্ষিপ্ত প্রশ্ন এবং 'answer' এ এক কথায়/সংক্ষেপে নির্ভুল উত্তর।
-
+   - ব্যবহারকারীর নির্বাচিত অধ্যায়গুলো থেকে ১০টি সংক্ষিপ্ত প্রশ্ন ও নির্ভুল সমাধান।
 ২. "জ্যামিতি থেকে শূন্যস্থান পূরণ কর" (math_geom_fib / math_fib) [ঠিক ১০টি শূন্যস্থান পূরণ প্রশ্ন]:
-   - অতি জরুরি ও কঠোর নিয়ম (STRICT EXTRACTION RULE):
-     * সোর্স হিসেবে সংযুক্ত জ্যামিতি বইয়ের ছবি/নোটগুলোর দিকে মনোযোগ দিন। সেখানে যে শূন্যস্থানগুলো রয়েছে হুবহু (verbatim) সেই বাক্যগুলো অক্ষর অক্ষত রেখে সোর্স থেকে ব্যবহার করুন। সোর্সের শূন্যস্থান বাদ দিয়ে নিজের থেকে ভিন্ন কিছু বানাবেন না।
-     * প্রতিটি প্রশ্নের 'questionText' এ অবশ্যই অবশ্যই "_______" সংবলিত শূন্যস্থান বাক্য হতে হবে।
-     * কঠোরভাবে নিষিদ্ধ: কোনো অবস্থাতেই প্রশ্নবাচক বাক্য বা প্রশ্নচিহ্ন '?' (যেমন "কাকে বলে?", "কী?", "বলতে কী বোঝায়?") তৈরি করবেন না! যদি সোর্স ছবিতে কোনো সংজ্ঞা থাকে, তবে সেটিকে শূন্যস্থান বাক্যে রূপান্তর করুন (যেমন: "যে কোণের পরিমাপ ৯০° তাকে _______ কোণ বলে।")।
-     * সোর্স ছবিতে যদি ১০টির কম শূন্যস্থান থাকে (যেমন ৮টি থাকে), তবেই কেবল বাকি ঘাটতিগুলো ৫ম শ্রেণির জ্যামিতির মৌলিক সংজ্ঞা ও বৈশিষ্ট্যের আলোকে "_______" ফরম্যাটে শূন্যস্থান হিসেবে তৈরি করবেন।
-   - 'questionText' এ বাক্যের উপযুক্ত জায়গায় "_______" থাকবে।
-   - 'answer' এ শুধুমাত্র শূন্যস্থানের সঠিক উত্তর।
-
+   - সোর্স জ্যামিতি বইয়ের বাক্য অনুযায়ী "_______" সংবলিত শূন্যস্থান।
 ৩. "খালি ঘর পূরণ কর" (math_blank_box) [৫টি প্রশ্ন]:
-   - AI নিজে ৫ম শ্রেণির মান অনুযায়ী ৫টি খালি ঘর সংবলিত সমীকরণ তৈরি করবে।
-   - প্রতিটি প্রশ্নে অবশ্যই গাণিতিক খালি বক্স প্রতীক '🔲' (বা '[  ]') ব্যবহার করবেন।
-   - উদাহরণস্বরূপ:
-     ক) ১৩৪ + 🔲 = ২৬৭
-     খ) 🔲 - ১২৭ = ৫৬
-     গ) ৬৪ × 🔲 = ৩৮৪০
-     ঘ) 🔲 ÷ ২৫ = ১৪
-     ঙ) ৫৬০০ ÷ 🔲 = ৭০
-   - 'questionText' এ খালি ঘরসহ সমীকরণ এবং 'answer' এ হিসাবসহ খালি ঘরের মান (যেমন: "২৬৭ - ১৩৪ = ১৩৩ ∴ 🔲 = ১৩৩")।
-
+   - '🔲' প্রতীকযুক্ত সমীকরণ।
 ৪. "গুণ / ভাগ কর" (math_mul_div) [৫টি প্রশ্ন]:
-   - AI নিজে ৫ম শ্রেণির উপযোগী মানসম্মত ৫টি গুণ ও ভাগ হিসাব তৈরি করবে।
-   - মোড সিলেকশন নিয়ন্ত্রণ (User Mode Selection):
-     * যদি mathMode === 'multiply' অথবা টাইটেল/নির্দেশনায় "শুধু গুণ" থাকে: ৫টি প্রশ্নই শুধুমাত্র গুণ হবে (যেমন: ৪২৫ × ১৬৪, ৫৬৭২ × ২৭৮, ৩২৫ × ১৪২ ইত্যাদি)।
-     * যদি mathMode === 'divide' অথবা টাইটেল/নির্দেশনায় "শুধু ভাগ" থাকে: ৫টি প্রশ্নই শুধুমাত্র ভাগ হবে (যেমন: ৭৩৫০ ÷ ২৫, ৪৬৫২ ÷ ১২, ৮৯৬০ ÷ ২৮ ইত্যাদি)।
-     * যদি mathMode === 'mixture' বা মিশ্রণ থাকে: ৩টি গুণ এবং ২টি ভাগের মিশ্রণ তৈরি করবেন।
-   - অতি জরুরি: 'questionText' এ "গুণ কর:" বা "ভাগ কর:" বা "হিসাব কর:" এই ধরনের কোনো লেখা বা প্রিফিক্স থাকবে না! শুধুমাত্র গাণিতিক রাশিটি লিখবেন (যেমন: "৪২৫ × ১৬৪" বা "৭৩৫০ ÷ ২৫")।
-   - 'answer' এ সঠিক গুণফল বা ভাগফল (ভাগশেষ থাকলে উল্লেখসহ)।
-
+   - ৫টি গুণ/ভাগ হিসাব।
 ৫. "দশমিকের গুণ ও ভাগ কর" (math_decimal_mul_div) [৫টি প্রশ্ন]:
-   - ৫ম শ্রেণির উপযোগী ৫টি দশমিকের গুণ ও ভাগ সমস্যা।
-   - মোড সিলেকশন নিয়ন্ত্রণ:
-     * যদি mathMode === 'multiply' বা "শুধু গুণ" হয়: ৫টিই দশমিকের গুণ (যেমন: ৪.৭৫ × ৩.২, ৮.৩৬ × ০.৪, ১২.৫ × ০.০৮ ইত্যাদি)।
-     * যদি mathMode === 'divide' বা "শুধু ভাগ" হয়: ৫টিই দশমিকের ভাগ (যেমন: ৭.৮ ÷ ০.৬, ২৩.৪ ÷ ৩, ৬.২৫ ÷ ০.৫ ইত্যাদি)।
-     * যদি mathMode === 'mixture' বা মিশ্রণ হয়: দশমিকের গুণ ও ভাগের মিশ্রণ।
-   - অতি জরুরি: 'questionText' এ "গুণ কর:" বা "ভাগ কর:" লেখা থাকবে না! শুধুমাত্র দশমিকের গাণিতিক হিসাবটি লিখবেন (যেমন: "৪.৭৫ × ৩.২")।
-   - 'answer' এ নির্ভুল দশমিক উত্তর।
-
-৬, ৭, ৮, ৯. "গাণিতিক সমস্যা সমাধান কর" (math_word_prob_6, math_word_prob_7, math_word_prob_8, math_word_prob_9) [প্রতিটিতে ১টি করে মোট ৪টি সমস্যা]:
-   - পাঠ্যবইয়ের নির্বাচিত অধ্যায়ের অনুশীলনী বা 'নিজে করি' অংশ থেকে একক গাণিতিক সমস্যা (single standalone word problem) হুবহু বা সরাসরি নিতে হবে।
-   - কঠোরভাবে নিষিদ্ধ: কোনো অবস্থাতেই ক), খ) যুক্ত বা বহুপদী সৃজনশীল কাঠামোবদ্ধ উপ-প্রশ্ন তৈরি করবেন না। প্রতিটি নম্বরে শুধুমাত্র একটি একক পূর্ণাঙ্গ গাণিতিক কথার সমস্যা (Single Word Problem) থাকবে।
-   - অতি জরুরি (উত্তরপত্রে বইয়ের পৃষ্ঠা নম্বর সংযোজন): শুধু গণিত বিষয়ের জন্য ৬, ৭, ৮, ৯ নং এর প্রতিটি 'answer' ফিল্ডের শুরুতে বা শেষে অবশ্যই বইটি/সোর্সের পৃষ্ঠা নম্বর স্পষ্টভাবে উল্লেখ করবেন। ফরম্যাট: "[বইয়ের পৃষ্ঠা নং: ...]" এবং এর সাথে ধাপে ধাপে বিস্তারিত সমাধান। যেমন: "[বইয়ের পৃষ্ঠা: ৩৩]\nসমাধান: ..."
-   - 'questionText' এ সম্পূর্ণ সমস্যাটি এবং 'answer' এ পৃষ্ঠা নম্বরসহ ধাপে ধাপে বিস্তারিত সমাধান।
-
-১০. "চিত্রসহ সংজ্ঞা লিখ" (math_geom_qa / math_geometry) [অবশ্যই ঠিক ২টি পৃথক প্রশ্ন তৈরি করতে হবে: ক এবং খ]:
-   - questions array-তে ঠিক ২টি প্রশ্ন অবজেক্ট (questions[0] এবং questions[1]) থাকতে হবে:
-     * প্রশ্ন ১ (ক): সোর্স জ্যামিতি বই/নোট অনুযায়ী ১ম বিষয়ের চিত্রসহ সংজ্ঞা (যেমন: "চিত্রসহ সংজ্ঞা লিখ: সূক্ষ্মকোণ ও সমকোণ।" অথবা "চিত্রসহ সংজ্ঞা লিখ: স্থূলকোণ ও সরলকোণ।")।
-     * প্রশ্ন ২ (খ): সোর্স অনুযায়ী ২য় বিষয়ের প্রকারভেদ বা অন্য জ্যামিতিক চিত্র ও সংজ্ঞা (যেমন: "চতুর্ভুজের প্রকারভেদের চিত্রসহ সংক্ষিপ্ত সংজ্ঞা দাও।" অথবা "চিত্রসহ সংজ্ঞা লিখ: রম্বস ও সামান্তরিক।")।
-   - কঠোর নিয়ম: কোনো "বৈশিষ্ট্য লিখ" থাকবে না! শুধুমাত্র চিত্র আঁকা, সংজ্ঞা ও প্রকারভেদ থাকবে।
-   - 'questionText' এ চিত্র ও সংজ্ঞার স্পষ্ট নির্দেশনামূলক প্রশ্ন থাকবে (ক ও খ)।
-   - 'answer' এ আদর্শ চিত্রের বিবরণ, সঠিক সংজ্ঞা ও প্রকারভেদ থাকবে।
+   - ৫টি দশমিকের হিসাব।
+৬, ৭, ৮, ৯. "গাণিতিক সমস্যা সমাধান কর" (math_word_prob_6, math_word_prob_7, math_word_prob_8, math_word_prob_9):
+   - পাঠ্যবইয়ের নির্বাচিত অধ্যায়ের অনুশীলনী থেকে একক গাণিতিক সমস্যা (single standalone word problem) হুবহু নিতে হবে।
+১০. "চিত্রসহ সংজ্ঞা লিখ" (math_geom_qa / math_geometry) [ঠিক ২টি পৃথক প্রশ্ন: ক এবং খ]:
+   - প্রশ্ন ১ (ক) ও প্রশ্ন ২ (খ): চিত্রসহ সংজ্ঞা ও প্রকারভেদ।
 
 অনুরোধকৃত সেকশনসমূহ ও প্রশ্নের সংখ্যা:
 ${JSON.stringify(reqSections, null, 2)}
@@ -269,18 +274,20 @@ ${customInst ? `শিক্ষকের অতিরিক্ত নির্�
 টার্গেট: শ্রেণি: ${cls}, বিষয়: ${subjectName || 'প্রাথমিক বিজ্ঞান'}।
 ভাষা: বিশুদ্ধ প্রমিত বাংলা।
 
+${universalRules}
+
 আপনার দায়িত্ব:
-1. সংযুক্ত পাঠ্যবইয়ের অধ্যায় থেকে বৈজ্ঞানিক তথ্য ও ধারণার ভিত্তিতে প্রশ্নপত্র তৈরি করুন।${sourcesBlock}
+1. সংযুক্ত পাঠ্যবইয়ের অধ্যায়সমূহের অনুশীলনী ও বিষয়বস্তু থেকে প্রশ্নপত্র তৈরি করুন। বইয়ের প্রশ্নগুলোকে ১০০% আগে প্রাধান্য দিন।${sourcesBlock}
 2. প্রতিটি সেকশনের জন্য নির্ধারিত 'count' অনুযায়ী প্রশ্ন ও উত্তর প্রস্তুত করুন।
 
-বিজ্ঞান প্রশ্নপত্রের নিয়ম:
+বিজ্ঞান প্রশ্নপত্রের নিয়ম:
 - "সঠিক উত্তরটি খাতায় লিখ" (mcq): প্রতিটি প্রশ্নে ঠিক ২টি অপশন দিন।
-- "সংক্ষেপে উত্তর লিখ" (short): ৫টি সংক্ষিপ্ত প্রশ্ন ও নির্ভুল বৈজ্ঞানিক উত্তর।
+- "সংক্ষেপে উত্তর লিখ" (short): বইয়ের সংক্ষিপ্ত প্রশ্নগুলো আগে ব্যবহার করুন। ৩ নম্বরের প্রশ্ন হলে অবশ্যই ৩ নম্বরের উপযোগী প্রশ্ন তৈরি করুন (যেমন: বইয়ে ২টি থাকলেও এখানে ৩টি উপাদান/উদ্ভিদ/কারণ/ব্যবহার জানতে চাইবেন)।
 - "শূন্যস্থান পূরণ কর" (fib): বাক্যে "_______" ব্যবহার করুন।
 - "সত্য/মিথ্যা নির্ণয় কর" (tf): বিবৃতি ও 'answer' এ "সত্য" বা "মিথ্যা"।
 - "বামপাশের সাথে ডানপাশের মিল কর" (match): 'questionText' এ বামপাশ, 'answer' এ ডানপাশ।
-- "নিচের প্রশ্ন গুলোর উত্তর দাও" (long): ৫টি গভীর, কাঠামোবদ্ধ বর্ণনামূলক প্রশ্ন ও বিস্তারিত ৩-৫ লাইনের আদর্শ উত্তর।
-- "মৌখিক ও শ্রেণিমূল্যায়ন" (oral): মৌখিক মূল্যায়নে কোনো লিখিত প্রশ্ন থাকবে না (questions: [])।
+- "নিচের প্রশ্ন গুলোর উত্তর দাও" (long): বইয়ের অনুশীলনী ও পাঠ্যবইয়ের যোগ্যতাভিত্তিক কাঠামোবদ্ধ বর্ণনামূলক প্রশ্ন ও বিস্তারিত আদর্শ উত্তর।
+- "মৌখিক ও শ্রেণিমূল্যায়ন" (oral): প্রশ্ন খালি রাখুন (questions: [])।
 
 অনুরোধকৃত সেকশনসমূহ:
 ${JSON.stringify(reqSections, null, 2)}
@@ -295,17 +302,19 @@ ${customInst ? `শিক্ষকের নির্দেশনা: ${customIn
 টার্গেট: শ্রেণি: ${cls}, বিষয়: ${subjectName || 'বাংলাদেশ ও বিশ্বপরিচয়'}।
 ভাষা: বিশুদ্ধ প্রমিত বাংলা।
 
+${universalRules}
+
 আপনার দায়িত্ব:
-1. সংযুক্ত পাঠ্যবইয়ের অধ্যায় থেকে সামাজিক, ঐতিহাসিক ও ভৌগোলিক তথ্যের ভিত্তিতে প্রশ্নপত্র তৈরি করুন।${sourcesBlock}
+1. সংযুক্ত পাঠ্যবইয়ের অধ্যায়সমূহের অনুশীলনী থেকে সরাসরি প্রশ্ন নির্বাচন করুন। বইয়ের প্রশ্নকে সর্বদা অগ্রাধিকার দিন।${sourcesBlock}
 2. প্রতিটি সেকশনের নির্ধারিত 'count' অনুযায়ী প্রশ্ন তৈরি করুন।
 
 বাংলাদেশ ও বিশ্বপরিচয় প্রশ্নপত্রের নিয়ম:
 - "সঠিক উত্তরটি খাতায় লিখ" (mcq): প্রতিটি প্রশ্নে ঠিক ২টি অপশন দিন।
-- "সংক্ষেপে উত্তর লিখ" (short): ৫টি স্পষ্ট সংক্ষিপ্ত প্রশ্ন ও উত্তর।
+- "সংক্ষেপে উত্তর লিখ" (short): বইয়ের সংক্ষিপ্ত প্রশ্নগুলো আগে ব্যবহার করুন। ৩ নম্বরের প্রশ্ন হলে ৩ নম্বরের উপযোগী করে রূপান্তর করুন (যেমন: "GPS এর পূর্ণরূপ কী? এর ২টি ব্যবহার লিখ।" অথবা "ম্যানগ্রোভ বনের ৩টি উদ্ভিদের নাম লিখ।")।
 - "শূন্যস্থান পূরণ কর" (fib): বাক্যে "_______" ব্যবহার করুন।
 - "সত্য/মিথ্যা নির্ণয় কর" (tf): বিবৃতি ও 'answer' এ "সত্য" বা "মিথ্যা"।
 - "বামপাশের সাথে ডানপাশের মিল কর" (match): 'questionText' এ বামপাশ, 'answer' এ ডানপাশ।
-- "কাঠামোবদ্ধ প্রশ্ন গুলোর উত্তর দাও" (long): ৫টি যোগ্যতাভিত্তিক কাঠামোবদ্ধ প্রশ্ন ও বিস্তারিত আদর্শ উত্তর।
+- "কাঠামোবদ্ধ প্রশ্ন গুলোর উত্তর দাও" (long): বইয়ের অনুশীলনী থেকে যোগ্যতাভিত্তিক কাঠামোবদ্ধ প্রশ্ন ও বিস্তারিত আদর্শ উত্তর।
 - "মৌখিক ও শ্রেণিমূল্যায়ন" (oral): প্রশ্ন খালি রাখুন (questions: [])।
 
 অনুরোধকৃত সেকশনসমূহ:
@@ -321,17 +330,19 @@ ${customInst ? `শিক্ষকের নির্দেশনা: ${customIn
 টার্গেট: শ্রেণি: ${cls}, বিষয়: ${subjectName || 'ইসলাম ও নৈতিক শিক্ষা'}।
 ভাষা: বিশুদ্ধ প্রমিত বাংলা।
 
+${universalRules}
+
 আপনার দায়িত্ব:
-1. সংযুক্ত পাঠ্যবইয়ের অধ্যায় থেকে কুরআন, হাদিস ও ইসলামিক শিষ্টাচার অনুযায়ী প্রশ্নপত্র তৈরি করুন।${sourcesBlock}
+1. সংযুক্ত পাঠ্যবইয়ের অধ্যায়সমূহের অনুশীলনী ও কুরআন-হাদিসের পাঠ থেকে প্রশ্নপত্র তৈরি করুন। বইয়ের প্রশ্নকে ১০০% অগ্রাধিকার দিন।${sourcesBlock}
 2. প্রতিটি সেকশনের 'count' অনুযায়ী প্রশ্ন ও নির্ভুল উত্তর তৈরি করুন।
 
 ইসলাম ও নৈতিক শিক্ষা প্রশ্নপত্রের নিয়ম:
 - "সঠিক উত্তরটি খাতায় লিখ" (mcq): ঠিক ২টি অপশন।
-- "সংক্ষেপে উত্তর লিখ" (short): ৫টি সংক্ষিপ্ত প্রশ্ন ও সহীহ উত্তর।
+- "সংক্ষেপে উত্তর লিখ" (short): বইয়ের প্রশ্নগুলো আগে দিন। ৩ নম্বরের প্রশ্ন হলে ৩টি পয়েন্ট/করণীয়/উদাহরণ দাবি করে এমন প্রশ্ন দিন।
 - "শূন্যস্থান পূরণ কর" (fib): বাক্যে "_______" ব্যবহার করুন।
 - "সত্য/মিথ্যা নির্ণয় কর" (tf): বিবৃতি ও 'answer' এ "সত্য" বা "মিথ্যা"।
 - "বামপাশের সাথে ডানপাশের মিল কর" (match): 'questionText' এ বামপাশ, 'answer' এ ডানপাশ।
-- "বর্ণনামূলক প্রশ্ন গুলোর উত্তর দাও" (long): ৫টি ইসলামিক বর্ণনামূলক প্রশ্ন ও বিস্তারিত আদর্শ উত্তর।
+- "বর্ণনামূলক প্রশ্ন গুলোর উত্তর দাও" (long): অনুশীলনী থেকে বর্ণনামূলক প্রশ্ন ও বিস্তারিত আদর্শ উত্তর।
 - "মৌখিক ও শ্রেণিমূল্যায়ন" (oral): প্রশ্ন খালি রাখুন (questions: [])।
 
 অনুরোধকৃত সেকশনসমূহ:
@@ -347,17 +358,19 @@ ${customInst ? `শিক্ষকের নির্দেশনা: ${customIn
 টার্গেট: শ্রেণি: ${cls}, বিষয়: ${subjectName || 'হিন্দুধর্ম ও নৈতিক শিক্ষা'}।
 ভাষা: বিশুদ্ধ প্রমিত বাংলা।
 
+${universalRules}
+
 আপনার দায়িত্ব:
-1. সংযুক্ত পাঠ্যবইয়ের অধ্যায় থেকে সনাতন ধর্ম ও নৈতিক শিক্ষার আলোকে প্রশ্ন তৈরি করুন।${sourcesBlock}
+1. সংযুক্ত পাঠ্যবইয়ের অধ্যায়সমূহের অনুশীলনী ও সনাতন ধর্মের পাঠ্য থেকে প্রশ্ন তৈরি করুন। বইয়ের প্রশ্নকে সর্বদা অগ্রাধিকার দিন।${sourcesBlock}
 2. প্রতিটি সেকশনের 'count' অনুযায়ী প্রশ্ন ও উত্তর তৈরি করুন।
 
 হিন্দুধর্ম ও নৈতিক শিক্ষা প্রশ্নপত্রের নিয়ম:
 - "সঠিক উত্তরটি খাতায় লিখ" (mcq): ঠিক ২টি অপশন।
-- "সংক্ষেপে উত্তর লিখ" (short): ৫টি সংক্ষিপ্ত প্রশ্ন ও উত্তর।
+- "সংক্ষেপে উত্তর লিখ" (short): অনুশীলনী থেকে সংক্ষিপ্ত প্রশ্ন ও ৩ নম্বরের উপযোগী রূপান্তর।
 - "শূন্যস্থান পূরণ কর" (fib): বাক্যে "_______" ব্যবহার করুন।
 - "সত্য/মিথ্যা নির্ণয় কর" (tf): বিবৃতি ও 'answer' এ "সত্য" বা "মিথ্যা"।
 - "বামপাশের সাথে ডানপাশের মিল কর" (match): 'questionText' এ বামপাশ, 'answer' এ ডানপাশ।
-- "বর্ণনামূলক প্রশ্ন গুলোর উত্তর দাও" (long): ৫টি বিস্তারিত প্রশ্ন ও আদর্শ উত্তর।
+- "বর্ণনামূলক প্রশ্ন গুলোর উত্তর দাও" (long): অনুশীলনী থেকে বিস্তারিত প্রশ্ন ও আদর্শ উত্তর।
 - "মৌখিক ও শ্রেণিমূল্যায়ন" (oral): প্রশ্ন খালি রাখুন (questions: [])।
 
 অনুরোধকৃত সেকশনসমূহ:
@@ -373,16 +386,11 @@ ${customInst ? `শিক্ষকের নির্দেশনা: ${customIn
 টার্গেট: শ্রেণি: ${cls}, বিষয়: ${subjectName || 'সাধারণ জ্ঞান'}।
 ভাষা: বিশুদ্ধ প্রমিত বাংলা।
 
-আপনার দায়িত্ব:
-1. সংযুক্ত সোর্স ও সমসাময়িক সাধারণ জ্ঞানের ভিত্তিতে প্রশ্ন তৈরি করুন।${sourcesBlock}
-2. প্রতিটি সেকশনের 'count' অনুযায়ী প্রশ্ন ও উত্তর তৈরি করুন।
+${universalRules}
 
-সাধারণ জ্ঞান প্রশ্নপত্রের নিয়ম:
-- "সঠিক উত্তরটি নির্বাচন কর" (gk_mcq): প্রতিটি প্রশ্নে ২টি সঠিক ও বিভ্রান্তিকর অপশন।
-- "এক কথায় উত্তর দাও" (gk_short): ১০টি তথ্যবহুল এক কথায় উত্তর উপযোগী প্রশ্ন ও সঠিক উত্তর।
-- "শূন্যস্থান পূরণ কর" (gk_fib): বাক্যে "_______" দিন।
-- "বামপাশের সাথে ডানপাশের মিল কর" (gk_match): 'questionText' এ বামপাশ, 'answer' এ ডানপাশ।
-- "মৌখিক পরীক্ষা" (oral): প্রশ্ন খালি রাখুন (questions: [])।
+আপনার দায়িত্ব:
+1. সংযুক্ত সোর্স ও অনুশীলনী থেকে প্রশ্ন তৈরি করুন। বইয়ের প্রশ্নকে অগ্রাধিকার দিন।${sourcesBlock}
+2. প্রতিটি সেকশনের 'count' অনুযায়ী প্রশ্ন ও উত্তর তৈরি করুন।
 
 অনুরোধকৃত সেকশনসমূহ:
 ${JSON.stringify(reqSections, null, 2)}
@@ -391,13 +399,15 @@ ${customInst ? `শিক্ষকের নির্দেশনা: ${customIn
 আউটপুট অবশ্যই JSON স্কিমায় দিন।`;
       }
 
-      // 10. GENERAL / CUSTOM FALLBACK (যেকোনো অন্য বিষয় বা কাস্টম বিষয়)
+      // 10. GENERAL / CUSTOM FALLBACK
       return `আপনি একজন অভিজ্ঞ শিক্ষক ও প্রশ্নপত্র প্রণেতা।
 টার্গেট: শ্রেণি: ${cls}, বিষয়: ${subjectName || 'পরীক্ষা'}।
 
+${universalRules}
+
 আপনার দায়িত্ব:
-1. সংযুক্ত সোর্স ও ছবি থেকে প্রাসঙ্গিক প্রশ্নপত্র তৈরি করুন।${sourcesBlock}
-2. নিচের requestedSections তালিকায় দেওয়া প্রতিটি সেকশনের নাম, ধরন ও 'count' কঠোরভাবে অনুসরণ করুন।
+1. সংযুক্ত সোর্সের অধ্যায়সমূহের অনুশীলনী ও টেক্সট থেকে প্রাসঙ্গিক প্রশ্নপত্র তৈরি করুন। বইয়ের প্রশ্নকে আগে প্রাধান্য দিন।${sourcesBlock}
+2. নিচের requestedSections তালিকায় দেওয়া প্রতিটি সেকশনের নাম, ধরন, 'marksPerQuestion' ও 'count' কঠোরভাবে অনুসরণ করুন।
 
 অনুরোধকৃত সেকশনসমূহ:
 ${JSON.stringify(reqSections, null, 2)}
