@@ -29,9 +29,8 @@ export async function POST(req) {
     // Format base64 images as Google Gen AI inline parts
     const imageParts = [];
     images.forEach((img, idx) => {
-      if (img.sourceTitle) {
-        imageParts.push({ text: `[Page ${idx + 1} - "${img.sourceTitle}"]:` });
-      }
+      const label = img.sourceTitle || `পৃষ্ঠা ${idx + 1}`;
+      imageParts.push({ text: `=== START IMAGE ${idx + 1}: "${label}" ===` });
       imageParts.push({
         inlineData: {
           mimeType: img.mimeType || 'image/jpeg',
@@ -40,19 +39,23 @@ export async function POST(req) {
       });
     });
 
-    const extractionPrompt = `You are an expert OCR and text extractor for Bangladeshi school textbooks (NCTB / Primary & Kindergarten curriculum).
+    const extractionPrompt = `You are an expert OCR and textbook extractor for Bangladeshi school textbooks (NCTB / Primary & Kindergarten curriculum).
 Task:
-1. Extract all readable Bengali and English text, titles, stories, poems, sentences, textbook exercises (অনুশীলনী, সংক্ষিপ্ত প্রশ্ন, কাঠামোবদ্ধ/বর্ণনামূলক প্রশ্ন ও প্রশ্নোত্তর), word meanings, mathematical equations, numbers, and grammar rules from the attached page images verbatim and accurately. Pay special attention to capturing every single question and exercise item present on the pages.
-2. Maintain natural paragraph structure and headings.
+1. Extract all readable Bengali and English text, chapter names, chapter numbers, stories, poems, sentences, textbook exercises (অনুশীলনী, সংক্ষিপ্ত প্রশ্ন, কাঠামোবদ্ধ/বর্ণনামূলক প্রশ্ন ও প্রশ্নোত্তর), word meanings, mathematical equations, numbers, and grammar rules from the attached page images verbatim and accurately. Pay special attention to capturing every single question and exercise item present on the pages.
+2. For each attached page image, precede its extracted content with its exact source header, formatted as:
+=== [সোর্স পৃষ্ঠা: "<sourceTitle>"] ===
+Where <sourceTitle> is the exact label given in "=== START IMAGE X: "<sourceTitle>" ===".
+Also, if a physical printed textbook page number is visible on the page (e.g. at the bottom or top of the page), explicitly write:
+[বইয়ের মুদ্রিত পৃষ্ঠা: <পৃষ্ঠা নম্বর>]
+Preserve all chapter titles, exercise section numbers (e.g. অনুশীলনী ১, অনুশীলনী ২, ৩, ৪) and question numbers (e.g. ১ এর (১), ২ এর ক, ৩) exactly as printed on each page.
 3. DO NOT generate new questions, do not summarize, and do not output JSON.
-4. Output ONLY the raw extracted plain text content.`;
+4. Output ONLY the raw extracted plain text content organized under the page headers.`;
 
     let candidateModels = [
       'gemini-2.0-flash',
       'gemini-2.0-flash-lite',
       'gemini-1.5-flash',
       'gemini-1.5-flash-8b',
-      'gemini-1.5-pro',
     ];
 
     try {

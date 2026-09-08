@@ -669,7 +669,7 @@ export default function PdfQuestionGeneratorPage() {
             }
 
             if (extractResult.text) {
-              fullExtractedText += `\n\n--- [পাঠ্যবইয়ের পৃষ্ঠা ${startPage}-${endPage} এর টেক্সট] ---\n` + extractResult.text.trim();
+              fullExtractedText += '\n\n' + extractResult.text.trim();
             }
           } catch (chunkErr) {
             console.error(`Error extracting text from chunk ${chunkIdx} (pages ${startPage}-${endPage}):`, chunkErr);
@@ -871,6 +871,45 @@ export default function PdfQuestionGeneratorPage() {
     }
   };
 
+  function AutoResizeTextarea({
+    value = '',
+    onChange,
+    className = '',
+    placeholder = '',
+    rows = 1,
+    minHeight = 28,
+    ...props
+  }) {
+    const textareaRef = React.useRef(null);
+  
+    const adjustHeight = React.useCallback(() => {
+      const node = textareaRef.current;
+      if (node) {
+        node.style.height = 'auto';
+        node.style.height = `${Math.max(node.scrollHeight, minHeight)}px`;
+      }
+    }, [minHeight]);
+  
+    React.useEffect(() => {
+      adjustHeight();
+    }, [value, adjustHeight]);
+  
+    return (
+      <textarea
+        ref={textareaRef}
+        value={value}
+        rows={rows}
+        onChange={(e) => {
+          adjustHeight();
+          if (onChange) onChange(e);
+        }}
+        className={`${className} resize-none overflow-hidden`}
+        placeholder={placeholder}
+        {...props}
+      />
+    );
+  }
+
   // Export to DOCX with Selected Orientation & Columns
   const handleExport = (includeAnswers = false) => {
     if (!generatedData || !generatedData.sections) return;
@@ -938,15 +977,15 @@ export default function PdfQuestionGeneratorPage() {
               <span className="text-sm font-bold text-slate-900 flex-shrink-0 pt-0.5">
                 {sectionNumStr}
               </span>
-              <textarea
-                rows={2}
+              <AutoResizeTextarea
+                rows={1}
                 value={cleanQuestionText(section.questions?.[0]?.questionText || section.title)}
                 onChange={(e) => {
                   const val = e.target.value;
                   handleQuestionTextChange(sIndex, 0, val);
                   handleSectionTitleChange(sIndex, val);
                 }}
-                className="text-sm font-normal text-slate-900 w-full p-1 bg-transparent hover:bg-slate-100 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded border-0 resize-y"
+                className="text-sm font-normal text-slate-900 w-full p-1 bg-transparent hover:bg-slate-100 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded border-0"
                 placeholder="গাণিতিক সমস্যা লিখুন..."
               />
             </div>
@@ -960,8 +999,8 @@ export default function PdfQuestionGeneratorPage() {
               <span className="text-sm font-bold text-slate-900 flex-shrink-0">
                 {sectionNumStr}
               </span>
-              <input
-                type="text"
+              <AutoResizeTextarea
+                rows={1}
                 value={
                   isComposition 
                     ? cleanCompositionDisplay(section.questions?.[0]?.questionText || section.title)
@@ -1040,8 +1079,7 @@ export default function PdfQuestionGeneratorPage() {
                 return (
                   <div key={q.id || qIndex} className="flex items-center space-x-1 bg-slate-50/90 border border-slate-200 rounded-lg px-2 py-1 shadow-2xs">
                     <span className="font-bold text-slate-700 text-xs flex-shrink-0">{subPrefix}</span>
-                    <input
-                      type="text"
+                    <AutoResizeTextarea
                       value={cleanQuestionText(q.questionText)}
                       onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
                       className="w-full text-xs font-semibold text-slate-900 bg-transparent border-0 focus:ring-1 focus:ring-indigo-500 rounded px-1"
@@ -1069,8 +1107,7 @@ export default function PdfQuestionGeneratorPage() {
                   return (
                     <div key={q.id || qIndex} className="flex items-center space-x-1 bg-slate-50/90 border border-slate-200 rounded-lg px-2 py-1 shadow-2xs">
                       <span className="font-bold text-slate-700 text-xs flex-shrink-0">{subPrefix}</span>
-                      <input
-                        type="text"
+                      <AutoResizeTextarea
                         value={cleanQuestionText(q.questionText)}
                         onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
                         className="w-full text-xs font-semibold text-slate-900 bg-transparent border-0 focus:ring-1 focus:ring-indigo-500 rounded px-1"
@@ -1108,7 +1145,7 @@ export default function PdfQuestionGeneratorPage() {
           <div className="space-y-2">
             {section.questions?.map((q, qIndex) => (
               <div key={q.id || qIndex} className="flex items-start justify-between gap-2">
-                <textarea
+                <AutoResizeTextarea
                   value={q.questionText}
                   onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
                   rows={isPunctuation ? 3 : 2}
@@ -1147,8 +1184,7 @@ export default function PdfQuestionGeneratorPage() {
                   <div key={q.id || qIndex} className="grid grid-cols-2 text-xs">
                     <div className="p-1.5 border-r border-slate-300 flex items-center space-x-1.5">
                       <span className="font-bold text-slate-600 flex-shrink-0">{leftLabel}</span>
-                      <input
-                        type="text"
+                      <AutoResizeTextarea
                         value={q.questionText}
                         onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
                         className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-indigo-500"
@@ -1156,8 +1192,7 @@ export default function PdfQuestionGeneratorPage() {
                     </div>
                     <div className="p-1.5 flex items-center space-x-1.5">
                       {rightLabel && <span className="font-bold text-slate-500 text-2xs flex-shrink-0">{rightLabel}</span>}
-                      <input
-                        type="text"
+                      <AutoResizeTextarea
                         value={q.answer}
                         onChange={(e) => handleAnswerTextChange(sIndex, qIndex, e.target.value)}
                         className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-emerald-500 text-emerald-900 font-medium"
@@ -1185,7 +1220,7 @@ export default function PdfQuestionGeneratorPage() {
                 <div key={q.id || qIndex} className="space-y-1 text-sm">
                   <div className="flex items-start justify-between gap-2">
                     <span className="font-bold text-slate-700 flex-shrink-0">{subPrefix}</span>
-                    <textarea
+                    <AutoResizeTextarea
                       value={q.questionText}
                       onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
                       rows={1}
@@ -2143,22 +2178,24 @@ export default function PdfQuestionGeneratorPage() {
                       {/* Answer Sections */}
                       <div className="space-y-6">
                         {previewSections.map((section, sIndex) => {
-                          const isMatchSec = section.id?.includes('match') || section.title?.includes('মিল');
+                          const isVocab = section.id?.includes('vocab') || section.id?.includes('word_meaning') || section.title?.includes('শব্দার্থ') || section.title?.includes('শব্দের অর্থ') || section.title?.toLowerCase().includes('word meaning');
+                          const isSentence = section.id?.includes('sentence') || section.id?.includes('make_sentence') || section.title?.includes('বাক্য') || section.title?.toLowerCase().includes('make sentence');
+                          const isPoem = section.id?.includes('poem') || section.title?.includes('কবিতা');
+                          const isPunctuation = section.id?.includes('punctuation') || section.title?.includes('বিরাম') || section.title?.includes('যতি') || section.title?.toLowerCase().includes('punctuation') || section.title?.toLowerCase().includes('capital');
+                          const isConjunct = section.id?.includes('conjunct') || section.title?.includes('যুক্তবর্ণ');
+                          const isFib = section.id?.includes('fib') || section.title?.includes('শূন্যস্থান') || section.title?.toLowerCase().includes('fill in');
+                          const isTf = section.id?.includes('tf') || section.title?.includes('সত্য') || section.title?.toLowerCase().includes('true');
+                          const isMatchSec = section.id?.includes('match') || section.title?.includes('মিল') || section.title?.toLowerCase().includes('match');
                           const isMcq = section.id?.includes('mcq') || section.title?.includes('সঠিক উত্তর') || (section.questions?.[0]?.options?.length > 0);
-                          const isFib = section.id?.includes('fib') || section.title?.includes('শূন্যস্থান');
-                          const isTf = section.id?.includes('tf') || section.title?.includes('সত্য');
                           const isOral = section.id?.includes('oral') || section.title?.includes('মৌখিক');
                           
-                          const isVocab = section.id?.includes('vocab') || section.title?.includes('শব্দার্থ');
-                          const isSentence = section.id?.includes('sentence') || section.title?.includes('বাক্য গঠন');
-                          const isPoem = section.id?.includes('poem') || section.title?.includes('কবিতা');
-                          const isPunctuation = section.id?.includes('punctuation') || section.title?.includes('বিরাম');
-                          const isConjunct = section.id?.includes('conjunct') || section.title?.includes('যুক্তবর্ণ');
                           const isSinglePrompt = isPoem || isPunctuation || ((section.id?.includes('theme') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('রচনা') || section.title?.includes('বর্ণনামূলক')) && section.questions?.length <= 1);
                           
                           const isShortQuestion = section.id?.includes('short') || section.title?.includes('সংক্ষেপ') || section.title?.includes('সংক্ষিপ্ত') || section.title?.includes('ছোট');
                           const isLongQuestion = section.id?.includes('long') || section.title?.includes('রচনামূলক') || section.title?.includes('বর্ণনামূলক') || section.title?.includes('কাঠামোবদ্ধ') || section.title?.includes('নিচের প্রশ্ন') || section.title?.includes('প্রশ্নের উত্তর') || section.title?.includes('মূলভাব');
-                          const isQuestionWithAi = isShortQuestion || isLongQuestion || isPunctuation || (!isMcq && !isMatchSec && !isFib && !isTf && !isOral && !isPoem);
+                          const isQaQuestion = section.id?.includes('qa') || section.id?.includes('desc') || section.id === 'en_questions' || section.id?.startsWith('math_word_prob');
+                          
+                          const isQuestionWithAi = (isShortQuestion || isLongQuestion || isQaQuestion) && !isVocab && !isSentence && !isConjunct && !isPunctuation && !isMcq && !isMatchSec && !isFib && !isTf && !isOral && !isPoem;
 
                           if (isOral) return null;
 
@@ -2239,10 +2276,9 @@ export default function PdfQuestionGeneratorPage() {
                                             <span className="text-xs font-bold text-emerald-700 mt-1.5 flex-shrink-0">
                                               {isVocab ? 'অর্থ:' : isSentence ? 'বাক্য:' : isConjunct ? 'বিভাজন ও শব্দ:' : 'উত্তর:'}
                                             </span>
-                                            <textarea
+                                            <AutoResizeTextarea
                                               value={q.answer || ''}
                                               onChange={(e) => handleAnswerTextChange(sIndex, qIndex, e.target.value)}
-                                              rows={isQuestionWithAi ? (q.answer && q.answer.length > 60 ? 3 : 2) : 1}
                                               className="w-full text-sm p-2 border border-emerald-300 rounded-lg bg-emerald-50/40 text-emerald-950 font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-none"
                                               placeholder={
                                                 isVocab ? 'যেমন: সুবাস' :

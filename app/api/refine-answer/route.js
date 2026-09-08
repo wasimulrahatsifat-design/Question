@@ -34,7 +34,7 @@ export async function POST(req) {
 
     let instructionDetails = '';
     if (action === 'make_longer') {
-      instructionDetails = 'বর্তমান উত্তরটিকে আরও বড়, বিস্তারিত ও তথ্যবহুল করুন (৪-৬টি পূর্ণাঙ্গ সহজবোধ্য বাক্য বা সুস্পষ্ট ৩-৪টি পয়েন্ট আকারে)। প্রাথমিক/কিন্ডারগার্টেন স্তরের জন্য উপযুক্ত প্রমিত বাংলায় লিখুন।';
+      instructionDetails = 'বর্তমান উত্তরটিকে আরও বড়, বিস্তারিত ও ৫ নম্বরের উপযোগী তথ্যবহুল করুন। প্রশ্নের ধরন অনুযায়ী ব্যাখ্যামূলক প্রশ্নে ৪-৬ বাক্যের সহজবোধ্য অনুচ্ছেদে এবং পয়েন্টভিত্তিক প্রশ্নে পয়েন্ট আকারে সহজ ও প্রাঞ্জল ভাষায় সাজিয়ে লিখুন (অপ্রয়োজনে জোর করে পয়েন্ট বানাবেন না)। ভাষা অবশ্যই কোমলমতি শিক্ষার্থীদের উপযোগী অত্যন্ত সহজ, সরল ও প্রমিত বাংলা হতে হবে।';
     } else if (action === 'make_shorter') {
       instructionDetails = 'বর্তমান উত্তরটিকে সংক্ষেপ করুন (১-২টি স্পষ্ট ও সংক্ষিপ্ত বাক্যে মূল তথ্যটুকু রাখুন)।';
     } else if (action === 'simplify') {
@@ -58,12 +58,46 @@ ${instructionDetails}
 ১. শুধুমাত্র পরিমার্জিত উত্তরটি লিখুন। কোনো ভূমিকা, শুভেচ্ছা বা অতিরিক্ত ব্যাখ্যা (যেমন "এখানে উত্তরটি দেওয়া হলো:") লিখবেন না।
 ২. ভাষা সম্পূর্ণ প্রমিত বাংলা হতে হবে।`;
 
-    const candidateModels = [
+    let candidateModels = [
       'gemini-2.0-flash',
-      'gemini-1.5-flash',
       'gemini-2.0-flash-lite',
-      'gemini-1.5-pro'
+      'gemini-1.5-flash',
+      'gemini-1.5-flash-8b'
     ];
+
+    try {
+      const listRes = await ai.models.list();
+      const valid = [];
+      for await (const m of listRes) {
+        const name = m.name?.replace(/^models\//, '');
+        const methods = m.supportedGenerationMethods || [];
+        const isGenerative = methods.length === 0 || methods.includes('generateContent');
+        if (
+          name && 
+          name.startsWith('gemini-') && 
+          isGenerative && 
+          !name.includes('embedding') && 
+          !name.includes('aqa') && 
+          !name.includes('imagen') && 
+          !name.includes('image') &&
+          !name.includes('tts') &&
+          !name.includes('audio') &&
+          !name.includes('2.5-pro') &&
+          !name.includes('1.5-pro')
+        ) {
+          valid.push(name);
+        }
+      }
+      if (valid.length > 0) {
+        const flash2 = valid.filter(n => n === 'gemini-2.0-flash' || (n.includes('2.0-flash') && !n.includes('lite')));
+        const flash2Lite = valid.filter(n => n.includes('2.0-flash-lite'));
+        const flash15 = valid.filter(n => n.includes('1.5-flash'));
+        const others = valid.filter(n => !flash2.includes(n) && !flash2Lite.includes(n) && !flash15.includes(n));
+        candidateModels = [...new Set([...flash2, ...flash2Lite, ...flash15, ...others, ...candidateModels])];
+      }
+    } catch (listErr) {
+      console.warn('Could not query dynamic models list in refine-answer:', listErr.message);
+    }
 
     let newAnswer = '';
     let lastError = null;
@@ -85,6 +119,10 @@ ${instructionDetails}
       } catch (err) {
         lastError = err;
         console.warn(`Model ${modelName} refinement failed:`, err.message);
+        const errMsg = err.message || '';
+        if (errMsg.includes('404') || errMsg.includes('not found') || errMsg.includes('is not supported')) {
+          continue;
+        }
       }
     }
 
