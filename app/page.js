@@ -53,7 +53,11 @@ import {
   UploadCloud,
   HardDrive,
   ExternalLink,
-  KeyRound
+  KeyRound,
+  ChevronDown,
+  ChevronUp,
+  CheckSquare,
+  Square
 } from 'lucide-react';
 
 const bnLetters = ['ক)', 'খ)', 'গ)', 'ঘ)', 'ঙ)', 'চ)', 'ছ)', 'জ)', 'ঝ)', 'ঞ)', 'ট)', 'ঠ)', 'ড)', 'ঢ)', 'ণ)'];
@@ -122,6 +126,7 @@ export default function PdfQuestionGeneratorPage() {
   const [newSecMarks, setNewSecMarks] = useState(1);
   const [newSecIsMcq, setNewSecIsMcq] = useState(false);
   const [newSecSourceId, setNewSecSourceId] = useState('');
+  const [openSecSourcePickerIdx, setOpenSecSourcePickerIdx] = useState(null);
 
   // Admin Setup Modal State
   const [showAdminModal, setShowAdminModal] = useState(false);
@@ -329,6 +334,172 @@ export default function PdfQuestionGeneratorPage() {
       const resetted = resetSectionsToDefault(selectedClass, selectedSubject);
       setSectionList(resetted);
     }
+  };
+
+  // Multi-source & Chapter Selection Helpers for Individual Sections
+  const getSectionSourceSummary = (sec) => {
+    const configs = sec.sourceConfigs || {};
+    const selectedSourceIds = Object.keys(configs).filter((id) => configs[id]?.selected);
+
+    if (selectedSourceIds.length === 0) {
+      if (sec.sourceId && sec.sourceId !== 'all' && sec.sourceId !== 'default') {
+        const match = availableSources.find((s) => s.id === sec.sourceId);
+        return {
+          text: match ? match.title : '১টি নির্দিষ্ট সোর্স',
+          isCustom: true,
+          count: 1,
+          totalChapters: 0,
+        };
+      }
+      return {
+        text: 'মেইন সোর্সসমূহ (ডিফল্ট)',
+        isCustom: false,
+        count: 0,
+        totalChapters: 0,
+      };
+    }
+
+    let totalChapters = 0;
+    const titles = [];
+
+    selectedSourceIds.forEach((id) => {
+      const src = availableSources.find((s) => s.id === id);
+      if (!src) return;
+      const cfg = configs[id];
+      if (
+        src.type === 'pdf' &&
+        Array.isArray(src.chapters) &&
+        src.chapters.length > 0 &&
+        Array.isArray(cfg?.selectedChapterIds) &&
+        cfg.selectedChapterIds.length > 0
+      ) {
+        totalChapters += cfg.selectedChapterIds.length;
+        if (cfg.selectedChapterIds.length === 1) {
+          const chap = src.chapters.find((c) => c.id === cfg.selectedChapterIds[0]);
+          titles.push(`${src.title} (${chap?.title || '১টি অধ্যায়'})`);
+        } else {
+          titles.push(`${src.title} (${cfg.selectedChapterIds.length}টি অধ্যায়)`);
+        }
+      } else {
+        titles.push(src.title);
+      }
+    });
+
+    let text = '';
+    if (selectedSourceIds.length === 1) {
+      text = titles[0] || '১টি সোর্স';
+    } else {
+      text = `${selectedSourceIds.length}টি সোর্স${totalChapters > 0 ? ` (${totalChapters}টি অধ্যায়)` : ''}`;
+    }
+
+    return {
+      text,
+      isCustom: true,
+      count: selectedSourceIds.length,
+      totalChapters,
+    };
+  };
+
+  const handleToggleSecSource = (secIdx, sourceId) => {
+    const updated = [...sectionList];
+    const sec = { ...updated[secIdx] };
+    const configs = { ...(sec.sourceConfigs || {}) };
+    const currentCfg = configs[sourceId];
+    const src = availableSources.find((s) => s.id === sourceId);
+
+    if (currentCfg?.selected) {
+      configs[sourceId] = {
+        ...currentCfg,
+        selected: false,
+      };
+    } else {
+      const hasChaps = src && Array.isArray(src.chapters) && src.chapters.length > 0;
+      configs[sourceId] = {
+        selected: true,
+        mode: hasChaps ? 'chapters' : 'pages',
+        selectedChapterIds: hasChaps ? src.chapters.map((c) => c.id) : [],
+        startPage: 1,
+        endPage: src?.pageCount || 1,
+      };
+    }
+
+    sec.sourceConfigs = configs;
+    sec.sourceId = null;
+    sec.sourceTitle = null;
+    updated[secIdx] = sec;
+    setSectionList(updated);
+    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+  };
+
+  const handleToggleSecChapter = (secIdx, sourceId, chapterId) => {
+    const updated = [...sectionList];
+    const sec = { ...updated[secIdx] };
+    const configs = { ...(sec.sourceConfigs || {}) };
+    const currentCfg = configs[sourceId] || { selected: true, mode: 'chapters', selectedChapterIds: [] };
+    const currentChapterIds = currentCfg.selectedChapterIds || [];
+
+    let newChapterIds;
+    if (currentChapterIds.includes(chapterId)) {
+      newChapterIds = currentChapterIds.filter((id) => id !== chapterId);
+    } else {
+      newChapterIds = [...currentChapterIds, chapterId];
+    }
+
+    configs[sourceId] = {
+      ...currentCfg,
+      selected: newChapterIds.length > 0 || currentCfg.mode === 'pages',
+      mode: 'chapters',
+      selectedChapterIds: newChapterIds,
+    };
+
+    sec.sourceConfigs = configs;
+    sec.sourceId = null;
+    sec.sourceTitle = null;
+    updated[secIdx] = sec;
+    setSectionList(updated);
+    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+  };
+
+  const handleSelectAllSecChapters = (secIdx, sourceId, selectAll = true) => {
+    const updated = [...sectionList];
+    const sec = { ...updated[secIdx] };
+    const configs = { ...(sec.sourceConfigs || {}) };
+    const src = availableSources.find((s) => s.id === sourceId);
+    const currentCfg = configs[sourceId] || { selected: true, mode: 'chapters', selectedChapterIds: [] };
+
+    if (selectAll && src && Array.isArray(src.chapters)) {
+      configs[sourceId] = {
+        ...currentCfg,
+        selected: true,
+        mode: 'chapters',
+        selectedChapterIds: src.chapters.map((c) => c.id),
+      };
+    } else {
+      configs[sourceId] = {
+        ...currentCfg,
+        mode: 'chapters',
+        selectedChapterIds: [],
+      };
+    }
+
+    sec.sourceConfigs = configs;
+    sec.sourceId = null;
+    sec.sourceTitle = null;
+    updated[secIdx] = sec;
+    setSectionList(updated);
+    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+  };
+
+  const handleResetSecSources = (secIdx) => {
+    const updated = [...sectionList];
+    updated[secIdx] = {
+      ...updated[secIdx],
+      sourceConfigs: {},
+      sourceId: null,
+      sourceTitle: null,
+    };
+    setSectionList(updated);
+    saveSectionsForSubject(selectedClass, selectedSubject, updated);
   };
 
   // Add custom section
@@ -581,12 +752,86 @@ export default function PdfQuestionGeneratorPage() {
 
     const activeSections = sectionList.filter((s) => s.enabled).map((sec) => {
       const copy = { ...sec };
-      if (copy.sourceId && copy.sourceId !== 'all' && copy.sourceId !== 'default') {
+      const secCfg = copy.sourceConfigs || {};
+      const customSelectedSourceIds = Object.keys(secCfg).filter((sId) => secCfg[sId]?.selected);
+
+      if (customSelectedSourceIds.length > 0) {
+        const titleParts = [];
+        customSelectedSourceIds.forEach((sId) => {
+          const foundSrc = availableSources.find((s) => s.id === sId);
+          if (!foundSrc) return;
+          const cfg = secCfg[sId] || {};
+
+          // If PDF has chapters and chapters were selected
+          if (
+            foundSrc.type === 'pdf' &&
+            Array.isArray(foundSrc.chapters) &&
+            foundSrc.chapters.length > 0 &&
+            Array.isArray(cfg.selectedChapterIds) &&
+            cfg.selectedChapterIds.length > 0
+          ) {
+            const chaps = foundSrc.chapters.filter((c) => cfg.selectedChapterIds.includes(c.id));
+            if (chaps.length > 0) {
+              const chapTitles = chaps.map((c) => c.title).join(', ');
+              titleParts.push(`${foundSrc.title} • ${chapTitles}`);
+
+              // Add/merge chapters to selectedItems so they get extracted
+              const existingItem = selectedItems.find((item) => item.source.id === foundSrc.id);
+              if (existingItem) {
+                if (!Array.isArray(existingItem.selectedChapters)) {
+                  existingItem.selectedChapters = [...chaps];
+                } else {
+                  chaps.forEach((c) => {
+                    if (!existingItem.selectedChapters.some((ec) => ec.id === c.id)) {
+                      existingItem.selectedChapters.push(c);
+                    }
+                  });
+                }
+              } else {
+                selectedItems.push({
+                  source: foundSrc,
+                  selectedChapters: [...chaps],
+                });
+              }
+              return;
+            }
+          }
+
+          // Fallback or non-chapter / custom page range / image / text source
+          const pageRangeStr = (cfg.startPage && cfg.endPage) ? ` (পৃষ্ঠা ${cfg.startPage}-${cfg.endPage})` : '';
+          titleParts.push(`${foundSrc.title}${pageRangeStr}`);
+          const existingItem = selectedItems.find((item) => item.source.id === foundSrc.id);
+          if (existingItem) {
+            if (!existingItem.customPageRanges) {
+              existingItem.customPageRanges = [];
+            }
+            if (cfg.startPage && cfg.endPage) {
+              existingItem.customPageRanges.push({
+                startPage: cfg.startPage,
+                endPage: cfg.endPage,
+              });
+            }
+            existingItem.hasPageRangeFallback = true;
+          } else {
+            selectedItems.push({
+              source: foundSrc,
+              startPage: cfg.startPage || 1,
+              endPage: cfg.endPage || foundSrc.pageCount || 1,
+              hasPageRangeFallback: true,
+              customPageRanges: (cfg.startPage && cfg.endPage) ? [{ startPage: cfg.startPage, endPage: cfg.endPage }] : [],
+            });
+          }
+        });
+
+        if (titleParts.length > 0) {
+          copy.sourceTitle = titleParts.join(' + ');
+        }
+      } else if (copy.sourceId && copy.sourceId !== 'all' && copy.sourceId !== 'default') {
         const foundSrc = availableSources.find((s) => s.id === copy.sourceId);
         if (foundSrc) {
           copy.sourceTitle = foundSrc.title;
-          const alreadyInSelected = selectedItems.some((item) => item.source.id === foundSrc.id);
-          if (!alreadyInSelected) {
+          const existingItem = selectedItems.find((item) => item.source.id === foundSrc.id);
+          if (!existingItem) {
             selectedItems.push({
               source: foundSrc,
               startPage: 1,
@@ -690,6 +935,24 @@ export default function PdfQuestionGeneratorPage() {
         throw new Error('সোর্স থেকে কোনো টেক্সট বা বিষয়বস্তু উত্তোলন করা সম্ভব হয়নি। অনুগ্রহ করে সোর্স চেক করুন।');
       }
 
+      // Collect Main Source Titles (from top-left general source selection box)
+      const mainSourceTitles = [];
+      availableSources.forEach((src) => {
+        const cfg = selectedSourceConfigs[src.id];
+        if (cfg && cfg.selected) {
+          if (src.type === 'pdf' && Array.isArray(src.chapters) && (cfg.selectedChapterIds || []).length > 0) {
+            const chaps = src.chapters.filter((c) => cfg.selectedChapterIds.includes(c.id));
+            if (chaps.length > 0) {
+              mainSourceTitles.push(`${src.title} • ${chaps.map((c) => c.title).join(', ')}`);
+              return;
+            }
+          }
+          const pageRangeStr = (cfg.startPage && cfg.endPage) ? ` (পৃষ্ঠা ${cfg.startPage}-${cfg.endPage})` : '';
+          mainSourceTitles.push(`${src.title}${pageRangeStr}`);
+        }
+      });
+      const mainSourceTitleStr = mainSourceTitles.join(' + ') || 'মূল সোর্স';
+
       // ==========================================
       // PHASE 2: Final Question Generation (Single Request)
       // ==========================================
@@ -703,6 +966,7 @@ export default function PdfQuestionGeneratorPage() {
           className: selectedClass,
           subject: selectedSubject,
           requestedSections: activeSections,
+          mainSourceTitle: mainSourceTitleStr,
           language,
           apiKey: userApiKey ? userApiKey.trim() : undefined,
         }),
@@ -714,11 +978,36 @@ export default function PdfQuestionGeneratorPage() {
         throw new Error(result.error || 'Server failed to generate questions from extracted text.');
       }
 
-      // Clean prefix duplicates from AI output
+      // Clean prefix duplicates from AI output and remove page tags from Section 1
       if (result.data && result.data.sections) {
-        result.data.sections.forEach((sec) => {
-          (sec.questions || []).forEach((q) => {
+        result.data.sections.forEach((sec, sIdx) => {
+          const isMath = selectedSubject?.includes('গণিত') || selectedSubject?.toLowerCase().includes('math');
+          const isMathShort = isMath && (sec.id === 'math_short' || sIdx === 0);
+          const isMathDecimal = isMath && (sec.id === 'math_decimal_mul_div' || sec.title?.includes('দশমিক'));
+
+          const fallbackDecimalProblems = [
+            { questionText: '০.৩ × ২', answer: '০.৬' },
+            { questionText: '০.৫ × ৪', answer: '২' },
+            { questionText: '৩.৭৬ × ১০', answer: '৩৭.৬' },
+            { questionText: '০.৮ ÷ ২', answer: '০.৪' },
+            { questionText: '৪.২ ÷ ৬', answer: '০.৭' },
+            { questionText: '১০.৫ ÷ ৫', answer: '২.১' },
+          ];
+
+          (sec.questions || []).forEach((q, qIdx) => {
             q.questionText = cleanQuestionText(q.questionText);
+            if (isMathShort && q.answer) {
+              // Strip any page references from 1 no. answer in Math
+              q.answer = String(q.answer).replace(/[\(\[]\s*পৃষ্ঠা[^\]\)]*[\)\]]\s*/gi, '').trim();
+            }
+            if (isMathDecimal) {
+              const hasDec = q.questionText && (q.questionText.includes('.') || q.questionText.includes('·') || q.questionText.includes('দশমিক'));
+              if (!hasDec) {
+                const fb = fallbackDecimalProblems[qIdx % fallbackDecimalProblems.length];
+                q.questionText = fb.questionText;
+                q.answer = fb.answer;
+              }
+            }
             if (q.options && Array.isArray(q.options)) {
               q.options = q.options.slice(0, 2).map((opt) => cleanOptionText(opt));
             }
@@ -1860,40 +2149,217 @@ export default function PdfQuestionGeneratorPage() {
                             </div>
                           </div>
 
-                          {/* Dedicated Source Selector for this Section */}
-                          <div className="bg-white p-2 rounded-xl border border-slate-200 space-y-1 shadow-2xs">
+                          {/* Dedicated Multi-Source & Chapter Selector for this Section */}
+                          <div className="bg-white p-2.5 rounded-xl border border-slate-200 space-y-2 shadow-2xs">
                             <div className="flex items-center justify-between">
                               <span className="text-[11px] font-bold text-slate-700 flex items-center">
                                 <BookOpen className="w-3.5 h-3.5 mr-1 text-indigo-600" />
-                                এই ধারার নির্দিষ্ট সোর্স:
+                                এই ধারার সোর্স ও অধ্যায়:
                               </span>
-                              {sec.sourceId && sec.sourceId !== 'all' && (
-                                <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
-                                  কাস্টম সোর্স
-                                </span>
-                              )}
+                              {(() => {
+                                const summary = getSectionSourceSummary(sec);
+                                return summary.isCustom ? (
+                                  <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
+                                    কাস্টম সোর্স
+                                  </span>
+                                ) : null;
+                              })()}
                             </div>
 
-                            <select
-                              value={sec.sourceId || ''}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                const updated = [...sectionList];
-                                updated[idx].sourceId = val || null;
-                                const match = availableSources.find((s) => s.id === val);
-                                updated[idx].sourceTitle = match ? match.title : null;
-                                setSectionList(updated);
-                                saveSectionsForSubject(selectedClass, selectedSubject, updated);
-                              }}
-                              className="w-full text-xs px-2 py-1.5 border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:ring-1 focus:ring-indigo-500 font-medium text-slate-800"
+                            {/* Summary / Toggle Button */}
+                            <button
+                              type="button"
+                              onClick={() => setOpenSecSourcePickerIdx(openSecSourcePickerIdx === idx ? null : idx)}
+                              className={`w-full flex items-center justify-between text-left text-xs px-2.5 py-2 border rounded-lg transition ${
+                                openSecSourcePickerIdx === idx
+                                  ? 'bg-indigo-50/80 border-indigo-300 text-indigo-900 font-bold ring-1 ring-indigo-400'
+                                  : getSectionSourceSummary(sec).isCustom
+                                  ? 'bg-indigo-50/40 border-indigo-200 text-indigo-950 font-semibold hover:bg-indigo-50'
+                                  : 'bg-slate-50 border-slate-200 text-slate-700 font-medium hover:bg-slate-100'
+                              }`}
                             >
-                              <option value="">📁 মেইন সোর্সসমূহ (ডিফল্ট)</option>
-                              {availableSources.map((src) => (
-                                <option key={src.id} value={src.id}>
-                                  {src.type === 'pdf' ? '📕' : src.type === 'image' ? '🖼️' : '📝'} {src.title}
-                                </option>
-                              ))}
-                            </select>
+                              <div className="flex items-center space-x-1.5 overflow-hidden flex-1 mr-1">
+                                <span className="truncate">{getSectionSourceSummary(sec).text}</span>
+                              </div>
+                              {openSecSourcePickerIdx === idx ? (
+                                <ChevronUp className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                              )}
+                            </button>
+
+                            {/* Expanded Multi-Source & Chapter Checklist Panel */}
+                            {openSecSourcePickerIdx === idx && (
+                              <div className="mt-2 pt-2 border-t border-indigo-100 space-y-2.5 animate-in fade-in duration-150">
+                                <div className="flex items-center justify-between text-[11px]">
+                                  <span className="font-bold text-slate-600">প্রয়োজনীয় সোর্সসমূহ টিক দিন:</span>
+                                  {getSectionSourceSummary(sec).isCustom && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleResetSecSources(idx)}
+                                      className="text-rose-600 hover:text-rose-800 font-bold underline"
+                                    >
+                                      রিসেট (ডিফল্ট)
+                                    </button>
+                                  )}
+                                </div>
+
+                                {availableSources.length === 0 ? (
+                                  <p className="text-[11px] text-slate-400 py-1 italic text-center">
+                                    কোনো সোর্স বা বই পাওয়া যায়নি। বামপাশের সোর্স প্যানেল থেকে বই বা ফাইল যোগ করুন।
+                                  </p>
+                                ) : (
+                                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                                    {availableSources.map((src) => {
+                                      const secCfg = sec.sourceConfigs?.[src.id];
+                                      const isSrcChecked = Boolean(secCfg?.selected);
+                                      const hasChaps = src.type === 'pdf' && Array.isArray(src.chapters) && src.chapters.length > 0;
+                                      const selectedChapIds = secCfg?.selectedChapterIds || [];
+
+                                      return (
+                                        <div
+                                          key={src.id}
+                                          className={`p-2 rounded-lg border transition ${
+                                            isSrcChecked
+                                              ? 'bg-indigo-50/50 border-indigo-200 shadow-2xs'
+                                              : 'bg-slate-50/60 border-slate-200 hover:bg-slate-50'
+                                          }`}
+                                        >
+                                          {/* Source Header Checkbox */}
+                                          <div className="flex items-center justify-between">
+                                            <label className="flex items-center space-x-2 cursor-pointer flex-1 overflow-hidden mr-1">
+                                              <input
+                                                type="checkbox"
+                                                checked={isSrcChecked}
+                                                onChange={() => handleToggleSecSource(idx, src.id)}
+                                                className="h-3.5 w-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                                              />
+                                              <span className="text-xs font-bold text-slate-800 truncate">
+                                                {src.type === 'pdf' ? '📕' : src.type === 'image' ? '🖼️' : '📝'} {src.title}
+                                              </span>
+                                            </label>
+                                            <span className="text-[10px] text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200 flex-shrink-0 font-medium">
+                                              {hasChaps ? `${src.chapters.length}টি অধ্যায়` : src.type === 'pdf' ? `${src.pageCount || 1} পৃষ্ঠা` : src.type === 'image' ? 'ছবি' : 'নোট'}
+                                            </span>
+                                          </div>
+
+                                          {/* Chapter Checklist if PDF source has chapters and is selected */}
+                                          {isSrcChecked && hasChaps && (
+                                            <div className="mt-2 pl-5 space-y-1.5 pt-1.5 border-t border-indigo-100/70">
+                                              <div className="flex items-center justify-between text-[10px]">
+                                                <span className="font-bold text-indigo-900">অধ্যায় নির্বাচন:</span>
+                                                <div className="flex items-center space-x-1.5">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleSelectAllSecChapters(idx, src.id, true)}
+                                                    className="text-indigo-600 hover:text-indigo-800 font-bold"
+                                                  >
+                                                    সব অধ্যায়
+                                                  </button>
+                                                  <span className="text-slate-300">|</span>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleSelectAllSecChapters(idx, src.id, false)}
+                                                    className="text-slate-500 hover:text-slate-700"
+                                                  >
+                                                    ক্লিয়ার
+                                                  </button>
+                                                </div>
+                                              </div>
+
+                                              <div className="space-y-1 max-h-36 overflow-y-auto pr-0.5 bg-white p-1 rounded-lg border border-indigo-100">
+                                                {src.chapters.map((chap) => {
+                                                  const isChapChecked = selectedChapIds.includes(chap.id);
+                                                  return (
+                                                    <label
+                                                      key={chap.id}
+                                                      className={`flex items-center justify-between px-2 py-1 rounded text-[11px] cursor-pointer transition ${
+                                                        isChapChecked
+                                                          ? 'bg-indigo-50 text-indigo-950 font-bold border border-indigo-200'
+                                                          : 'text-slate-600 hover:bg-slate-50 font-medium'
+                                                      }`}
+                                                    >
+                                                      <div className="flex items-center space-x-1.5 overflow-hidden flex-1 mr-1">
+                                                        <input
+                                                          type="checkbox"
+                                                          checked={isChapChecked}
+                                                          onChange={() => handleToggleSecChapter(idx, src.id, chap.id)}
+                                                          className="h-3 w-3 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                                                        />
+                                                        <span className="truncate">{chap.title}</span>
+                                                      </div>
+                                                      <span className="text-[9px] text-indigo-700 bg-indigo-100/80 px-1 py-0.2 rounded flex-shrink-0 font-medium">
+                                                        পৃ: {chap.startPage}-{chap.endPage}
+                                                      </span>
+                                                    </label>
+                                                  );
+                                                })}
+                                              </div>
+                                            </div>
+                                          )}
+
+                                          {/* Page range input if PDF has no chapters and is selected */}
+                                          {isSrcChecked && !hasChaps && src.type === 'pdf' && (
+                                            <div className="mt-2 pl-5 flex items-center justify-between text-[11px] pt-1.5 border-t border-indigo-100/70">
+                                              <span className="font-medium text-slate-600">পৃষ্ঠা রেঞ্জ:</span>
+                                              <div className="flex items-center space-x-1">
+                                                <input
+                                                  type="number"
+                                                  min="1"
+                                                  max={src.pageCount || 999}
+                                                  value={secCfg?.startPage || 1}
+                                                  onChange={(e) => {
+                                                    const val = Math.max(1, parseInt(e.target.value) || 1);
+                                                    const updated = [...sectionList];
+                                                    const s = { ...updated[idx] };
+                                                    const c = { ...(s.sourceConfigs || {}) };
+                                                    c[src.id] = { ...(c[src.id] || { selected: true }), startPage: val };
+                                                    s.sourceConfigs = c;
+                                                    updated[idx] = s;
+                                                    setSectionList(updated);
+                                                    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+                                                  }}
+                                                  className="w-10 text-center text-xs px-1 py-0.5 border border-indigo-200 rounded bg-white font-bold"
+                                                />
+                                                <span className="text-slate-400 text-[10px]">থেকে</span>
+                                                <input
+                                                  type="number"
+                                                  min={secCfg?.startPage || 1}
+                                                  max={src.pageCount || 999}
+                                                  value={secCfg?.endPage || src.pageCount || 1}
+                                                  onChange={(e) => {
+                                                    const val = Math.max(secCfg?.startPage || 1, parseInt(e.target.value) || 1);
+                                                    const updated = [...sectionList];
+                                                    const s = { ...updated[idx] };
+                                                    const c = { ...(s.sourceConfigs || {}) };
+                                                    c[src.id] = { ...(c[src.id] || { selected: true }), endPage: val };
+                                                    s.sourceConfigs = c;
+                                                    updated[idx] = s;
+                                                    setSectionList(updated);
+                                                    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+                                                  }}
+                                                  className="w-10 text-center text-xs px-1 py-0.5 border border-indigo-200 rounded bg-white font-bold"
+                                                />
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+
+                                <div className="pt-1 flex items-center justify-end">
+                                  <button
+                                    type="button"
+                                    onClick={() => setOpenSecSourcePickerIdx(null)}
+                                    className="px-3 py-1 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-2xs transition"
+                                  >
+                                    ✓ সম্পন্ন
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                           </div>
 
                           {/* Math Mode Selector (শুধু গুণ / শুধু ভাগ / মিশ্রণ) for Section 4, 5 and arithmetic sections */}
@@ -2195,7 +2661,7 @@ export default function PdfQuestionGeneratorPage() {
                           const isLongQuestion = section.id?.includes('long') || section.title?.includes('রচনামূলক') || section.title?.includes('বর্ণনামূলক') || section.title?.includes('কাঠামোবদ্ধ') || section.title?.includes('নিচের প্রশ্ন') || section.title?.includes('প্রশ্নের উত্তর') || section.title?.includes('মূলভাব');
                           const isQaQuestion = section.id?.includes('qa') || section.id?.includes('desc') || section.id === 'en_questions' || section.id?.startsWith('math_word_prob');
                           
-                          const isQuestionWithAi = (isShortQuestion || isLongQuestion || isQaQuestion) && !isVocab && !isSentence && !isConjunct && !isPunctuation && !isMcq && !isMatchSec && !isFib && !isTf && !isOral && !isPoem;
+                          const isQuestionWithAi = (sIndex !== 0) && (isShortQuestion || isLongQuestion || isQaQuestion) && !isVocab && !isSentence && !isConjunct && !isPunctuation && !isMcq && !isMatchSec && !isFib && !isTf && !isOral && !isPoem;
 
                           if (isOral) return null;
 
