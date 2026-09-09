@@ -2,7 +2,8 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { exportQuestionPaperDocx, toBengaliNumerals, cleanOptionText, cleanQuestionText } from '../lib/docxGenerator';
+import { exportQuestionPaperDocx, toBengaliNumerals, cleanOptionText, cleanQuestionText, getSectionType, fixBilingualGrammarQuestion, ensureBengaliGrammarAnswer } from '../lib/docxGenerator';
+import { generateQuestionsDirectly } from '../lib/geminiDirect';
 import { 
   DEFAULT_CLASSES,
   DEFAULT_CLASS_SUBJECTS,
@@ -302,6 +303,70 @@ export default function PdfQuestionGeneratorPage() {
       setAdminSections(loaded);
     }
   }, [adminSubject]);
+
+  // Subject language detection
+  const isGk = Boolean(selectedSubject && (selectedSubject.includes('সাধারণ জ্ঞান') || selectedSubject.toLowerCase().includes('general knowledge') || selectedSubject.toLowerCase().includes('gk') || selectedSubject.includes('জিকে')));
+  const isEnglish = !isGk && Boolean(selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english')));
+
+  // Header string helpers for Question Paper canvas
+  const getHeaderSchoolName = () => {
+    if (!isEnglish) return schoolName;
+    if (!schoolName || schoolName.includes('শওকত ভূঁইয়া') || schoolName.toLowerCase().includes('showkot')) {
+      return 'Showkot Bhuiyan Child Care Homes';
+    }
+    return schoolName;
+  };
+
+  const getHeaderSchoolSubtitle = () => {
+    if (!isEnglish) return schoolSubtitle;
+    if (!schoolSubtitle || schoolSubtitle.includes('প্রি-ক্যাডেট') || schoolSubtitle.toLowerCase().includes('pre-cadet')) {
+      return 'Pre-Cadet Child Care Homes';
+    }
+    return schoolSubtitle;
+  };
+
+  const getHeaderExamTitle = () => {
+    if (!isEnglish) return examTitle;
+    if (examTitle.includes('৩য়') || examTitle.toLowerCase().includes('3rd')) return '3ʳᵈ Semester Examination- 2026';
+    if (examTitle.includes('১ম') || examTitle.toLowerCase().includes('1st')) return '1ˢᵗ Semester Examination- 2026';
+    return '2ⁿᵈ Semester Examination- 2026';
+  };
+
+  const getHeaderSubjectName = () => {
+    if (!isEnglish) return `বিষয়: ${selectedSubject}`;
+    if (selectedSubject.includes('২য়') || selectedSubject.toLowerCase().includes('2nd') || selectedSubject.toLowerCase().includes('grammar') || selectedSubject.includes('ব্যাকরণ')) {
+      return 'Subject- English 2ⁿᵈ';
+    }
+    if (selectedSubject.includes('১ম') || selectedSubject.toLowerCase().includes('1st')) {
+      return 'Subject- English 1ˢᵗ';
+    }
+    return 'Subject- English';
+  };
+
+  const getHeaderClassName = () => {
+    if (!isEnglish) return `শ্রেণি: ${selectedClass}`;
+    if (selectedClass === 'পঞ্চম' || selectedClass === '৫ম' || selectedClass.toLowerCase() === 'five') return 'Class- Five';
+    if (selectedClass === 'চতুর্থ' || selectedClass === '৪র্থ' || selectedClass.toLowerCase() === 'four') return 'Class- Four';
+    if (selectedClass === 'তৃতীয়' || selectedClass === '৩য়' || selectedClass.toLowerCase() === 'three') return 'Class- Three';
+    if (selectedClass === 'দ্বিতীয়' || selectedClass === '২য়' || selectedClass.toLowerCase() === 'two') return 'Class- Two';
+    if (selectedClass === 'প্রথম' || selectedClass === '১ম' || selectedClass.toLowerCase() === 'one') return 'Class- One';
+    if (selectedClass === 'শিশু' || selectedClass.toLowerCase() === 'play' || selectedClass.toLowerCase() === 'nursery') return 'Class- Play/Nursery';
+    return `Class- ${selectedClass}`;
+  };
+
+  const getHeaderTime = () => {
+    if (!isEnglish) return `সময়: ${timeAllowed}`;
+    if (timeAllowed.includes('১') || timeAllowed.includes('1')) return 'Time: 1hr';
+    if (timeAllowed.includes('২') || timeAllowed.includes('2')) return 'Time: 2hr';
+    if (timeAllowed.includes('৩') || timeAllowed.includes('3')) return 'Time: 3hr';
+    return `Time: ${timeAllowed}`;
+  };
+
+  const getHeaderFullMarks = () => {
+    const marksVal = fullMarks ? fullMarks : (isGk ? 50 : totalCalculatedMarks);
+    if (!isEnglish) return `পূর্ণমান: ${toBengaliNumerals(marksVal)}`;
+    return `Full marks: ${marksVal}`;
+  };
 
   // Calculate dynamic total marks
   const currentSections = generatedData?.sections || sectionList.filter(s => s.enabled);
@@ -858,82 +923,10 @@ export default function PdfQuestionGeneratorPage() {
       setErrorMessage('');
       setStatusMessage('নির্বাচিত সোর্সসমূহ প্রস্তুত করা হচ্ছে...');
 
-      // Step 1: Process all selected sources (PDF pages to images, image base64, text notes)
+      // Process all selected sources (PDF pages to base64 images, image files, text notes)
       const { images, textSources } = await processSelectedSources(selectedItems, (msg) => {
         setStatusMessage(msg);
       });
-
-      let fullExtractedText = '';
-
-      // ==========================================
-      // PHASE 1: Text Extraction (Chunked Map)
-      // ==========================================
-      if (images && images.length > 0) {
-        const CHUNK_SIZE = 3;
-        const chunks = [];
-        for (let i = 0; i < images.length; i += CHUNK_SIZE) {
-          const chunkImages = images.slice(i, i + CHUNK_SIZE);
-          chunks.push({
-            chunkImages,
-            startPage: i + 1,
-            endPage: Math.min(i + CHUNK_SIZE, images.length),
-          });
-        }
-
-        const totalChunks = chunks.length;
-        let chunkIdx = 0;
-
-        for (const chunk of chunks) {
-          chunkIdx++;
-          const { chunkImages, startPage, endPage } = chunk;
-
-          // Rate Limit Protection: 3-second delay between chunk requests
-          if (chunkIdx > 1) {
-            setStatusMessage(`রেট লিমিট বিরতি: পরবর্তী ব্যাচের জন্য ৩ সেকেন্ড অপেক্ষা করা হচ্ছে (${chunkIdx}/${totalChunks})...`);
-            await new Promise((r) => setTimeout(r, 3000));
-          }
-
-          // Progress UI: Update status with current chunk and page range
-          setStatusMessage(`Extracting text from pages ${startPage}-${endPage} (${chunkIdx}/${totalChunks})... Please wait`);
-
-          try {
-            const extractRes = await fetch('/api/extract-text', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                images: chunkImages,
-                language,
-                apiKey: userApiKey ? userApiKey.trim() : undefined,
-              }),
-            });
-
-            const extractResult = await extractRes.json();
-
-            if (!extractRes.ok) {
-              throw new Error(extractResult.error || `Failed to extract text from pages ${startPage}-${endPage}.`);
-            }
-
-            if (extractResult.text) {
-              fullExtractedText += '\n\n' + extractResult.text.trim();
-            }
-          } catch (chunkErr) {
-            console.error(`Error extracting text from chunk ${chunkIdx} (pages ${startPage}-${endPage}):`, chunkErr);
-            const errorMsg = chunkErr instanceof Error ? chunkErr.message : String(chunkErr);
-            alert(`সতর্কতা: পৃষ্ঠা ${startPage}-${endPage} এর টেক্সট উত্তোলনে সমস্যা হয়েছে: ${errorMsg}\nঅন্যান্য পৃষ্ঠা থেকে কাজ অব্যাহত রাখা হচ্ছে...`);
-          }
-        }
-      }
-
-      // Append text note sources to extracted text
-      if (textSources && textSources.length > 0) {
-        textSources.forEach((t, idx) => {
-          fullExtractedText += `\n\n--- [সংযুক্ত নোট/সোর্স ${idx + 1}: ${t.title || 'নোট'}] ---\n` + (t.text || '');
-        });
-      }
-
-      if (!fullExtractedText.trim()) {
-        throw new Error('সোর্স থেকে কোনো টেক্সট বা বিষয়বস্তু উত্তোলন করা সম্ভব হয়নি। অনুগ্রহ করে সোর্স চেক করুন।');
-      }
 
       // Collect Main Source Titles (from top-left general source selection box)
       const mainSourceTitles = [];
@@ -953,34 +946,29 @@ export default function PdfQuestionGeneratorPage() {
       });
       const mainSourceTitleStr = mainSourceTitles.join(' + ') || 'মূল সোর্স';
 
-      // ==========================================
-      // PHASE 2: Final Question Generation (Single Request)
-      // ==========================================
-      setStatusMessage('Analyzing whole text and generating final questions...');
+      // Direct Client-Side Call to Google Gemini API (Single Pass for all 30+ pages)
+      setStatusMessage('Generating questions from all pages... This may take up to a minute.');
 
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fullExtractedText: fullExtractedText.trim(),
-          className: selectedClass,
-          subject: selectedSubject,
-          requestedSections: activeSections,
-          mainSourceTitle: mainSourceTitleStr,
-          language,
-          apiKey: userApiKey ? userApiKey.trim() : undefined,
-        }),
+      const effectiveApiKey = (userApiKey && userApiKey.trim()) || 
+        (typeof window !== 'undefined' ? (localStorage.getItem('gemini_api_key') || '') : '') || 
+        process.env.NEXT_PUBLIC_GEMINI_API_KEY || 
+        '';
+
+      const resultData = await generateQuestionsDirectly({
+        images,
+        textSources,
+        className: selectedClass,
+        subject: selectedSubject,
+        requestedSections: activeSections,
+        mainSourceTitle: mainSourceTitleStr,
+        customInstructions: '',
+        apiKey: effectiveApiKey,
+        onStatusChange: (msg) => setStatusMessage(msg),
       });
 
-      const result = await res.json();
-
-      if (!res.ok) {
-        throw new Error(result.error || 'Server failed to generate questions from extracted text.');
-      }
-
-      // Clean prefix duplicates from AI output and remove page tags from Section 1
-      if (result.data && result.data.sections) {
-        result.data.sections.forEach((sec, sIdx) => {
+      // Clean prefix duplicates and format outputs
+      if (resultData && resultData.sections) {
+        resultData.sections.forEach((sec, sIdx) => {
           const isMath = selectedSubject?.includes('গণিত') || selectedSubject?.toLowerCase().includes('math');
           const isMathShort = isMath && (sec.id === 'math_short' || sIdx === 0);
           const isMathDecimal = isMath && (sec.id === 'math_decimal_mul_div' || sec.title?.includes('দশমিক'));
@@ -994,10 +982,15 @@ export default function PdfQuestionGeneratorPage() {
             { questionText: '১০.৫ ÷ ৫', answer: '২.১' },
           ];
 
+          const isEnglish2ndSec = isEnglish && (sec.id?.includes('def') || sec.id?.includes('qa') || sec.id?.includes('questions') || sec.id?.includes('grammar') || sec.title?.includes('সংজ্ঞা') || sec.title?.includes('কাকে বলে') || sec.title?.toLowerCase().includes('answer the following') || sec.title?.toLowerCase().includes('question'));
+
           (sec.questions || []).forEach((q, qIdx) => {
             q.questionText = cleanQuestionText(q.questionText);
+            if (isEnglish2ndSec) {
+              q.questionText = fixBilingualGrammarQuestion(q.questionText);
+              q.answer = ensureBengaliGrammarAnswer(q.questionText, q.answer);
+            }
             if (isMathShort && q.answer) {
-              // Strip any page references from 1 no. answer in Math
               q.answer = String(q.answer).replace(/[\(\[]\s*পৃষ্ঠা[^\]\)]*[\)\]]\s*/gi, '').trim();
             }
             if (isMathDecimal) {
@@ -1015,7 +1008,7 @@ export default function PdfQuestionGeneratorPage() {
         });
       }
 
-      setGeneratedData(result.data);
+      setGeneratedData(resultData);
       setStatusMessage('');
       setErrorMessage('');
     } catch (err) {
@@ -1226,21 +1219,84 @@ export default function PdfQuestionGeneratorPage() {
 
   // Helper to render a question section in the Question Paper preview
   const renderQuestionPaperSection = (section, sIndex) => {
-    const isEnglish = Boolean(selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english')));
+    const isGkSec = Boolean(selectedSubject && (selectedSubject.includes('সাধারণ জ্ঞান') || selectedSubject.toLowerCase().includes('general knowledge') || selectedSubject.toLowerCase().includes('gk') || selectedSubject.includes('জিকে'))) || section.id === 'gk_questions';
+    const isEnglish2nd = !isGkSec && Boolean(selectedSubject && (selectedSubject.includes('২য়') || selectedSubject.includes('2nd') || selectedSubject.toLowerCase().includes('grammar') || selectedSubject.includes('ব্যাকরণ')));
+    const isEnglish = !isGkSec && Boolean(selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english')));
+    const isEnglishOnly = isEnglish && !isEnglish2nd;
+
+    if (isGkSec) {
+      return (
+        <div key={section.id || sIndex} className="space-y-3 pt-1">
+          {/* Centered Instruction Line */}
+          <div className="text-center py-1.5 border-b border-slate-200">
+            <span className="text-sm font-bold text-slate-800">
+              {(section.title || 'যেকোনো দশটি প্রশ্নের উত্তর দাও। সকল প্রশ্নের মান সমান').replace(/সমান\s*সমান/g, 'সমান')}
+            </span>
+          </div>
+
+          {/* List of 12 Direct Questions: ১।, ২।, ৩।, ..., ১২। */}
+          <div className="space-y-1.5 pt-1">
+            {section.questions?.map((q, qIndex) => {
+              const prefix = `${toBengaliNumerals(qIndex + 1)}। `;
+              return (
+                <div key={q.id || qIndex} className="flex items-start justify-between gap-2 text-sm">
+                  <span className="font-bold text-slate-800 flex-shrink-0 pt-1">{prefix}</span>
+                  <AutoResizeTextarea
+                    value={cleanQuestionText(q.questionText)}
+                    onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                    rows={1}
+                    className="w-full text-sm p-1.5 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 font-medium text-slate-900 bg-white"
+                    placeholder="সাধারণ জ্ঞান প্রশ্ন..."
+                  />
+                  <button
+                    onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                    className="text-slate-300 hover:text-red-500 p-1 flex-shrink-0"
+                    title="মুছুন"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              );
+            })}
+            {(!section.questions || section.questions.length < 12) && (
+              <button
+                type="button"
+                onClick={() => handleAddQuestion(sIndex)}
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold inline-flex items-center pt-1"
+              >
+                <Plus className="w-3.5 h-3.5 mr-0.5" /> প্রশ্ন যোগ করুন
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     const qCount = section.questions ? section.questions.length : (section.count || 1);
     const markPerQ = section.marksPerQuestion !== undefined ? section.marksPerQuestion : 1;
     const totalSecMarks = Math.round(qCount * markPerQ * 10) / 10;
 
-    const isVocab = section.id?.includes('vocab') || section.id?.includes('word_meaning') || section.title?.includes('শব্দার্থ') || section.title?.toLowerCase().includes('word meaning');
-    const isSentence = section.id?.includes('sentence') || section.id?.includes('make_sentence') || section.title?.includes('বাক্য গঠন') || section.title?.toLowerCase().includes('make sentence');
-    const isPoem = section.id?.includes('poem') || section.title?.includes('কবিতা');
-    const isPunctuation = section.id?.includes('punctuation') || section.title?.includes('বিরাম') || section.title?.toLowerCase().includes('punctuation') || section.title?.toLowerCase().includes('capital letters');
-    const isComposition = section.id?.includes('composition') || section.title?.toLowerCase().includes('composition') || section.title?.includes('রচনা');
-    const isConjunct = section.id?.includes('conjunct') || section.title?.includes('যুক্তবর্ণ');
-    const isInlineComma = isVocab || isSentence || isConjunct;
-    const isSinglePrompt = isPunctuation || ((section.id?.includes('theme') || section.id?.includes('desc') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('বর্ণনামূলক')) && section.questions?.length <= 1);
-    const isMatchSec = (section.id?.includes('match') || section.title?.includes('মিল') || section.title?.toLowerCase().includes('match')) && !section.title?.toLowerCase().includes('question') && !section.id?.includes('questions');
-    const isMcq = section.id?.includes('mcq') || section.title?.includes('সঠিক উত্তর') || (section.questions?.[0]?.options?.length > 0);
+    const secType = getSectionType(section);
+    const isVocab = secType === 'vocab';
+    const isSentence = secType === 'sentence';
+    const isPoem = secType === 'poem';
+    const isPunctuation = secType === 'punctuation';
+    const isComposition = secType === 'essay';
+    const isConjunct = secType === 'conjunct';
+    const isOpposite = secType === 'opposite';
+    const isOneWord = secType === 'one_word';
+    const isSynonym = secType === 'synonym';
+    const isBagdhara = secType === 'bagdhara';
+    const isLetter = secType === 'letter';
+    const isEssay = secType === 'essay';
+    const isSummary = secType === 'summary';
+    const isAmplification = secType === 'amplification';
+
+    const isMatchSec = secType === 'match';
+    const isMcq = secType === 'mcq' || (section.questions?.[0]?.options?.length > 0);
+
+    const isInlineComma = isVocab || isSentence || isConjunct || isOpposite || isOneWord || isSynonym || isBagdhara;
+    const isSinglePrompt = isPunctuation || isLetter || isEssay || isComposition || isSummary || isAmplification || ((section.id?.includes('theme') || section.id?.includes('desc') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('বর্ণনামূলক') || section.title?.includes('দরখাস্ত') || section.title?.includes('চিঠি')) && section.questions?.length <= 1) || (section.questions?.length === 1 && !isMcq);
 
     const isSingleMathProblem = section.questions?.length === 1 && (section.id?.startsWith('math_word') || section.id?.startsWith('math_problem') || section.id === 'math_lcm_gcd');
     const isMathGrid = (
@@ -1282,7 +1338,7 @@ export default function PdfQuestionGeneratorPage() {
               {secMarksStr}
             </span>
           </div>
-        ) : isPoem || isComposition ? (
+        ) : isPoem || isComposition || (isLetter && (!section.questions || section.questions.length <= 1)) ? (
           <div className="flex items-center justify-between border-b border-slate-200 pb-1">
             <div className="flex items-center space-x-1.5 flex-1 mr-2">
               <span className="text-sm font-bold text-slate-900 flex-shrink-0">
@@ -1293,16 +1349,20 @@ export default function PdfQuestionGeneratorPage() {
                 value={
                   isComposition 
                     ? cleanCompositionDisplay(section.questions?.[0]?.questionText || section.title)
-                    : cleanPoemDisplay(section.questions?.[0]?.questionText || section.title)
+                    : (isLetter
+                        ? cleanQuestionText(section.questions?.[0]?.questionText || section.title)
+                        : cleanPoemDisplay(section.questions?.[0]?.questionText || section.title))
                 }
                 onChange={(e) => {
                   const val = e.target.value;
-                  const cleaned = isComposition ? cleanCompositionDisplay(val) : cleanPoemDisplay(val);
+                  const cleaned = isComposition 
+                    ? cleanCompositionDisplay(val) 
+                    : (isLetter ? cleanQuestionText(val) : cleanPoemDisplay(val));
                   handleQuestionTextChange(sIndex, 0, cleaned);
                   handleSectionTitleChange(sIndex, cleaned);
                 }}
                 className="text-sm font-bold text-slate-900 w-full p-1 bg-transparent hover:bg-slate-100 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded border-0"
-                placeholder={isComposition ? 'Write a composition about “The Sundarbans”' : 'প্রশ্ন লিখুন...'}
+                placeholder={isComposition ? 'Write a paragraph...' : 'প্রশ্ন লিখুন...'}
               />
             </div>
             <span className="text-sm font-bold text-slate-800 flex-shrink-0">
@@ -1426,8 +1486,8 @@ export default function PdfQuestionGeneratorPage() {
               </button>
             )}
           </div>
-        ) : (isPoem || isComposition || isSingleMathProblem) ? (
-          /* Poem, Composition, and Single Math Problems are fully displayed on the top header line without extra boxes */
+        ) : (isPoem || isComposition || (isLetter && (!section.questions || section.questions.length <= 1)) || isSingleMathProblem) ? (
+          /* Poem, Composition, Single-line Application, and Single Math Problems are fully displayed on the top header line without extra boxes */
           null
         ) : isSinglePrompt ? (
           /* 2. Single Prompt (বিরাম চিহ্ন, Composition, Punctuation, রচনা) */
@@ -1435,7 +1495,7 @@ export default function PdfQuestionGeneratorPage() {
             {section.questions?.map((q, qIndex) => (
               <div key={q.id || qIndex} className="flex items-start justify-between gap-2">
                 <AutoResizeTextarea
-                  value={q.questionText}
+                  value={cleanQuestionText(q.questionText)}
                   onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
                   rows={isPunctuation ? 3 : 2}
                   className="w-full text-sm p-2 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 font-medium"
@@ -1474,7 +1534,7 @@ export default function PdfQuestionGeneratorPage() {
                     <div className="p-1.5 border-r border-slate-300 flex items-center space-x-1.5">
                       <span className="font-bold text-slate-600 flex-shrink-0">{leftLabel}</span>
                       <AutoResizeTextarea
-                        value={q.questionText}
+                        value={cleanQuestionText(q.questionText)}
                         onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
                         className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-indigo-500"
                       />
@@ -1502,18 +1562,26 @@ export default function PdfQuestionGeneratorPage() {
           /* 4. Standard List Questions (শূন্যস্থান, সাধারণ প্রশ্ন, সত্য-মিথ্যা, True/False, Questions) */
           <div className="space-y-2">
             {section.questions?.map((q, qIndex) => {
-              const subPrefix = isEnglish
-                ? `${enLetters[qIndex] || `(${qIndex + 1})`} `
-                : (isMcq ? `${toBengaliNumerals(qIndex + 1)}) ` : `${bnLetters[qIndex] || `(${qIndex + 1})`} `);
+              const subPrefix = isMcq
+                ? (isEnglish ? `${qIndex + 1}) ` : `${toBengaliNumerals(qIndex + 1)}) `)
+                : (section.questions?.length === 1 
+                    ? '' 
+                    : (isEnglish ? `${enLetters[qIndex] || `(${qIndex + 1})`} ` : `${bnLetters[qIndex] || `(${qIndex + 1})`} `));
+              
+              let qVal = cleanQuestionText(q.questionText);
+              if (isEnglish && (secType === 'qa' || secType === 'generic') && (qVal.toLowerCase().includes('what is') || qVal.toLowerCase().includes('what are') || qVal.toLowerCase().includes('how many') || qVal.toLowerCase().includes('define'))) {
+                qVal = fixBilingualGrammarQuestion(qVal);
+              }
+
               return (
                 <div key={q.id || qIndex} className="space-y-1 text-sm">
                   <div className="flex items-start justify-between gap-2">
                     <span className="font-bold text-slate-700 flex-shrink-0">{subPrefix}</span>
                     <AutoResizeTextarea
-                      value={q.questionText}
+                      value={qVal}
                       onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
                       rows={1}
-                      className="w-full text-sm p-1.5 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500"
+                      className="w-full text-sm p-1.5 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 font-medium"
                     />
                     <button
                       onClick={() => handleDeleteQuestion(sIndex, qIndex)}
@@ -2587,31 +2655,31 @@ export default function PdfQuestionGeneratorPage() {
                         <div className="space-y-4 pr-0 md:pr-4">
                           {/* Header Box on Left Column */}
                           <div className="text-center space-y-1 pb-3">
-                            <h2 className="text-lg font-bold text-slate-900 leading-tight">{schoolName}</h2>
-                            {schoolSubtitle && <p className="text-sm font-semibold text-slate-700">{schoolSubtitle}</p>}
-                            <p className="text-sm font-bold text-slate-800 pt-0.5">{examTitle}</p>
+                            <h2 className="text-lg font-bold text-slate-900 leading-tight">
+                              {getHeaderSchoolName()}
+                            </h2>
+                            {schoolSubtitle && (
+                              <p className="text-sm font-semibold text-slate-700">
+                                {getHeaderSchoolSubtitle()}
+                              </p>
+                            )}
+                            <p className="text-sm font-bold text-slate-800 pt-0.5">
+                              {getHeaderExamTitle()}
+                            </p>
                             <p className="text-sm font-bold text-slate-800">
-                              {selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english'))
-                                ? `Subject- ${selectedSubject}`
-                                : `বিষয়: ${selectedSubject}`}
+                              {getHeaderSubjectName()}
                             </p>
                             <p className="text-sm font-bold text-slate-800 pb-1">
-                              {selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english'))
-                                ? `Class- ${selectedClass === 'পঞ্চম' ? 'Five' : selectedClass}`
-                                : `শ্রেণি: ${selectedClass}`}
+                              {getHeaderClassName()}
                             </p>
 
                             {/* Time & Full Marks Bar */}
                             <div className="flex items-center justify-between text-sm font-medium text-slate-800 pt-2 border-t border-slate-100 px-1">
                               <span>
-                                {selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english'))
-                                  ? `Time: ${timeAllowed}`
-                                  : `সময়: ${timeAllowed}`}
+                                {getHeaderTime()}
                               </span>
                               <span>
-                                {selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english'))
-                                  ? `Full marks: ${fullMarks || totalCalculatedMarks}`
-                                  : `পূর্ণমান: ${toBengaliNumerals(fullMarks || totalCalculatedMarks)}`}
+                                {getHeaderFullMarks()}
                               </span>
                             </div>
                           </div>
@@ -2644,24 +2712,34 @@ export default function PdfQuestionGeneratorPage() {
                       {/* Answer Sections */}
                       <div className="space-y-6">
                         {previewSections.map((section, sIndex) => {
-                          const isVocab = section.id?.includes('vocab') || section.id?.includes('word_meaning') || section.title?.includes('শব্দার্থ') || section.title?.includes('শব্দের অর্থ') || section.title?.toLowerCase().includes('word meaning');
-                          const isSentence = section.id?.includes('sentence') || section.id?.includes('make_sentence') || section.title?.includes('বাক্য') || section.title?.toLowerCase().includes('make sentence');
-                          const isPoem = section.id?.includes('poem') || section.title?.includes('কবিতা');
-                          const isPunctuation = section.id?.includes('punctuation') || section.title?.includes('বিরাম') || section.title?.includes('যতি') || section.title?.toLowerCase().includes('punctuation') || section.title?.toLowerCase().includes('capital');
-                          const isConjunct = section.id?.includes('conjunct') || section.title?.includes('যুক্তবর্ণ');
-                          const isFib = section.id?.includes('fib') || section.title?.includes('শূন্যস্থান') || section.title?.toLowerCase().includes('fill in');
-                          const isTf = section.id?.includes('tf') || section.title?.includes('সত্য') || section.title?.toLowerCase().includes('true');
-                          const isMatchSec = section.id?.includes('match') || section.title?.includes('মিল') || section.title?.toLowerCase().includes('match');
-                          const isMcq = section.id?.includes('mcq') || section.title?.includes('সঠিক উত্তর') || (section.questions?.[0]?.options?.length > 0);
-                          const isOral = section.id?.includes('oral') || section.title?.includes('মৌখিক');
+                          const secType = getSectionType(section);
+                          const isVocab = secType === 'vocab';
+                          const isSentence = secType === 'sentence';
+                          const isPoem = secType === 'poem';
+                          const isPunctuation = secType === 'punctuation';
+                          const isConjunct = secType === 'conjunct';
+                          const isOpposite = secType === 'opposite';
+                          const isOneWord = secType === 'one_word';
+                          const isSynonym = secType === 'synonym';
+                          const isBagdhara = secType === 'bagdhara';
+                          const isLetter = secType === 'letter';
+                          const isEssay = secType === 'essay';
+                          const isSummary = secType === 'summary';
+                          const isAmplification = secType === 'amplification';
+
+                          const isFib = secType === 'fib';
+                          const isTf = secType === 'tf';
+                          const isMatchSec = secType === 'match';
+                          const isMcq = secType === 'mcq' || (section.questions?.[0]?.options?.length > 0);
+                          const isOral = secType === 'oral';
                           
-                          const isSinglePrompt = isPoem || isPunctuation || ((section.id?.includes('theme') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('রচনা') || section.title?.includes('বর্ণনামূলক')) && section.questions?.length <= 1);
+                          const isSinglePrompt = isPoem || isPunctuation || isLetter || isEssay || isSummary || isAmplification || ((section.id?.includes('theme') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('রচনা') || section.title?.includes('বর্ণনামূলক') || section.title?.includes('দরখাস্ত') || section.title?.includes('চিঠি')) && section.questions?.length <= 1) || (section.questions?.length === 1 && !isMcq);
                           
                           const isShortQuestion = section.id?.includes('short') || section.title?.includes('সংক্ষেপ') || section.title?.includes('সংক্ষিপ্ত') || section.title?.includes('ছোট');
                           const isLongQuestion = section.id?.includes('long') || section.title?.includes('রচনামূলক') || section.title?.includes('বর্ণনামূলক') || section.title?.includes('কাঠামোবদ্ধ') || section.title?.includes('নিচের প্রশ্ন') || section.title?.includes('প্রশ্নের উত্তর') || section.title?.includes('মূলভাব');
                           const isQaQuestion = section.id?.includes('qa') || section.id?.includes('desc') || section.id === 'en_questions' || section.id?.startsWith('math_word_prob');
                           
-                          const isQuestionWithAi = (sIndex !== 0) && (isShortQuestion || isLongQuestion || isQaQuestion) && !isVocab && !isSentence && !isConjunct && !isPunctuation && !isMcq && !isMatchSec && !isFib && !isTf && !isOral && !isPoem;
+                          const isQuestionWithAi = (sIndex !== 0) && (isShortQuestion || isLongQuestion || isQaQuestion) && !isVocab && !isSentence && !isConjunct && !isOpposite && !isOneWord && !isSynonym && !isBagdhara && !isPunctuation && !isMcq && !isMatchSec && !isFib && !isTf && !isOral && !isPoem;
 
                           if (isOral) return null;
 
@@ -2689,11 +2767,14 @@ export default function PdfQuestionGeneratorPage() {
                                     const isCurrentlyRefining = refiningKey === itemKey;
                                     const isCustomPromptOpen = customPromptOpenKey === itemKey;
                                     
-                                    // Prefix logic: No ক, খ for vocab, sentence, conjunct, single-prompt
-                                    const showSubPrefix = !isVocab && !isSentence && !isConjunct && !isSinglePrompt;
-                                    const subPrefix = isMcq 
-                                      ? `${toBengaliNumerals(qIndex + 1)}) ` 
-                                      : showSubPrefix ? `${bnLetters[qIndex] || `(${qIndex + 1})`} ` : '';
+                                    const isGkSec = section.id === 'gk_questions' || isGk;
+                                    // Prefix logic: No ক, খ for vocab, sentence, conjunct, opposite, one_word, synonym, bagdhara, single-prompt
+                                    const showSubPrefix = !isVocab && !isSentence && !isConjunct && !isOpposite && !isOneWord && !isSynonym && !isBagdhara && !isSinglePrompt && (section.questions?.length > 1);
+                                    const subPrefix = isGkSec
+                                      ? `${toBengaliNumerals(qIndex + 1)}। `
+                                      : isMcq 
+                                        ? `${toBengaliNumerals(qIndex + 1)}) ` 
+                                        : showSubPrefix ? `${bnLetters[qIndex] || `(${qIndex + 1})`} ` : '';
 
                                     return (
                                       <div key={q.id || qIndex} className="p-3 bg-white rounded-xl border border-slate-200 shadow-2xs space-y-2">
@@ -2703,13 +2784,27 @@ export default function PdfQuestionGeneratorPage() {
                                             {subPrefix && <span className="font-bold text-slate-800">{subPrefix}</span>}
                                             <span className="font-medium text-slate-900">
                                               {isVocab ? (
-                                                <span className="font-bold text-indigo-950">শব্দ: {q.questionText}</span>
+                                                <span className="font-bold text-indigo-950">শব্দ: {cleanQuestionText(q.questionText)}</span>
                                               ) : isSentence ? (
-                                                <span className="font-bold text-indigo-950">শব্দ: {q.questionText}</span>
+                                                <span className="font-bold text-indigo-950">শব্দ: {cleanQuestionText(q.questionText)}</span>
                                               ) : isConjunct ? (
-                                                <span className="font-bold text-indigo-950">যুক্তবর্ণ: {q.questionText}</span>
+                                                <span className="font-bold text-indigo-950">যুক্তবর্ণ: {cleanQuestionText(q.questionText)}</span>
+                                              ) : isOpposite ? (
+                                                <span className="font-bold text-indigo-950">মূল শব্দ: {cleanQuestionText(q.questionText)}</span>
+                                              ) : isOneWord ? (
+                                                <span className="font-bold text-indigo-950">বাক্যাংশ: {cleanQuestionText(q.questionText)}</span>
+                                              ) : isSynonym ? (
+                                                <span className="font-bold text-indigo-950">মূল শব্দ: {cleanQuestionText(q.questionText)}</span>
+                                              ) : isBagdhara ? (
+                                                <span className="font-bold text-indigo-950">বাগধারা: {cleanQuestionText(q.questionText)}</span>
+                                              ) : isSummary ? (
+                                                <span className="font-bold text-indigo-950">মূল অনুচ্ছেদ: {cleanQuestionText(q.questionText)}</span>
+                                              ) : isAmplification ? (
+                                                <span className="font-bold text-indigo-950">মূল উক্তি/চরণ: {cleanQuestionText(q.questionText)}</span>
+                                              ) : isLetter ? (
+                                                <span className="font-bold text-indigo-950">বিষয়: {cleanQuestionText(q.questionText)}</span>
                                               ) : (
-                                                q.questionText
+                                                cleanQuestionText(q.questionText)
                                               )}
                                             </span>
                                           </div>
@@ -2740,7 +2835,7 @@ export default function PdfQuestionGeneratorPage() {
                                         <div className="space-y-2 pt-1 border-t border-slate-100">
                                           <div className="flex items-start space-x-2">
                                             <span className="text-xs font-bold text-emerald-700 mt-1.5 flex-shrink-0">
-                                              {isVocab ? 'অর্থ:' : isSentence ? 'বাক্য:' : isConjunct ? 'বিভাজন ও শব্দ:' : 'উত্তর:'}
+                                              {isVocab ? 'অর্থ:' : isSentence ? 'বাক্য:' : isConjunct ? 'বিভাজন ও শব্দ:' : isOpposite ? 'বিপরীত শব্দ:' : isOneWord ? 'এক কথায় প্রকাশ:' : isSynonym ? 'সমার্থক শব্দ:' : isBagdhara ? 'অর্থ ও বাক্য:' : isSummary ? 'সারাংশ:' : isAmplification ? 'ভাবসম্প্রসারণ:' : isLetter ? 'আবেদনপত্র / দরখাস্ত:' : isEssay ? 'রচনা:' : 'উত্তর:'}
                                             </span>
                                             <AutoResizeTextarea
                                               value={q.answer || ''}
@@ -2750,6 +2845,13 @@ export default function PdfQuestionGeneratorPage() {
                                                 isVocab ? 'যেমন: সুবাস' :
                                                 isSentence ? 'যেমন: বাঘ একটি বন্য প্রাণী।' :
                                                 isConjunct ? 'যেমন: ন + ধ (গন্ধ, বান্ধব)' :
+                                                isOpposite ? 'যেমন: আলো = অন্ধকার' :
+                                                isOneWord ? 'যেমন: যা পূর্বে ঘটেনি = অভূতপূর্ব' :
+                                                isSynonym ? 'যেমন: আকাশ = গগন' :
+                                                isBagdhara ? 'যেমন: অসম্ভব বস্তু (লোকটি আকাশ কুসুম ভেবে সময় কাটাচ্ছে।)' :
+                                                isSummary ? 'আদর্শ সারাংশ লিখুন...' :
+                                                isAmplification ? 'ভাবসম্প্রসারণ লিখুন...' :
+                                                isLetter ? 'তারিখ, বরাবর, বিষয় ও মূল বক্তব্যসহ পূর্ণাঙ্গ দরখাস্ত লিখুন...' :
                                                 'সঠিক উত্তর লিখুন...'
                                               }
                                             />

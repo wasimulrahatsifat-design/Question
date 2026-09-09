@@ -79,6 +79,18 @@ import {
   resetSectionsToDefault,
   DEFAULT_CURRICULUM_PRESETS,
 } from '@/lib/curriculumPresets';
+import {
+  loadCustomPrompt,
+  saveCustomPrompt,
+  resetCustomPrompt,
+  isPromptCustomized,
+  loadUniversalRules,
+  saveUniversalRules,
+  resetUniversalRules,
+  DEFAULT_PROMPT_TEMPLATES,
+  DEFAULT_UNIVERSAL_RULES,
+} from '@/lib/promptStorage';
+import { getAvailableGenerativeModels } from '@/lib/geminiDirect';
 import { toBengaliNumerals } from '@/lib/docxGenerator';
 
 export default function AdminPage() {
@@ -90,13 +102,24 @@ export default function AdminPage() {
   const [authError, setAuthError] = useState('');
   const [newPasswordInput, setNewPasswordInput] = useState('');
 
-  const [activeTab, setActiveTab] = useState('sources'); // 'sources' | 'supabase' | 'classes_subjects' | 'syllabus' | 'demo_pattern' | 'security'
+  const [activeTab, setActiveTab] = useState('sources'); // 'sources' | 'supabase' | 'classes_subjects' | 'syllabus' | 'demo_pattern' | 'prompts' | 'security'
 
   // Class and Subject state
   const [classesList, setClassesList] = useState([]);
   const [selectedClass, setSelectedClass] = useState('পঞ্চম');
   const [subjectsList, setSubjectsList] = useState([]);
   const [selectedSubject, setSelectedSubject] = useState('বিজ্ঞান');
+
+  // AI Prompts Management State
+  const [promptClass, setPromptClass] = useState('পঞ্চম');
+  const [promptSubject, setPromptSubject] = useState('গণিত');
+  const [promptEditorMode, setPromptEditorMode] = useState('subject'); // 'subject' | 'universal'
+  const [currentPromptText, setCurrentPromptText] = useState('');
+  const [isPromptDirty, setIsPromptDirty] = useState(false);
+  const [isCurrentCustomized, setIsCurrentCustomized] = useState(false);
+  const [promptIdeaInput, setPromptIdeaInput] = useState('');
+  const [isGeneratingPromptWithAi, setIsGeneratingPromptWithAi] = useState(false);
+  const [generatingPromptStatus, setGeneratingPromptStatus] = useState('');
 
   // Class & Subject Management dedicated tab state
   const [selectedManageClass, setSelectedManageClass] = useState('পঞ্চম');
@@ -901,6 +924,191 @@ export default function AdminPage() {
     showToast(`"${demoClass}" শ্রেণির "${demoSubject}" বিষয়ের জন্য প্যাটার্ন সফলভাবে সংরক্ষিত হয়েছে!`, 'success');
   };
 
+  // Prompts Management Functions
+  const refreshPromptEditor = (cls, sub, mode) => {
+    const targetMode = mode || promptEditorMode;
+    const targetClass = cls || promptClass;
+    const targetSub = sub || promptSubject;
+
+    if (targetMode === 'universal') {
+      const uRules = loadUniversalRules();
+      setCurrentPromptText(uRules);
+      setIsCurrentCustomized(uRules !== DEFAULT_UNIVERSAL_RULES);
+      setIsPromptDirty(false);
+    } else {
+      const pText = loadCustomPrompt(targetSub, targetClass);
+      setCurrentPromptText(pText);
+      setIsCurrentCustomized(isPromptCustomized(targetSub, targetClass));
+      setIsPromptDirty(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'prompts') {
+      const subjects = loadSubjectsForClass(promptClass);
+      if (subjects.length > 0 && !subjects.includes(promptSubject)) {
+        setPromptSubject(subjects[0]);
+        refreshPromptEditor(promptClass, subjects[0], promptEditorMode);
+      } else {
+        refreshPromptEditor(promptClass, promptSubject, promptEditorMode);
+      }
+    }
+  }, [activeTab, promptClass, promptSubject, promptEditorMode]);
+
+  const handleSavePrompt = () => {
+    if (promptEditorMode === 'universal') {
+      saveUniversalRules(currentPromptText);
+      showToast('সার্বজনীন নির্দেশনাবলী সফলভাবে সংরক্ষণ করা হয়েছে!', 'success');
+    } else {
+      saveCustomPrompt(promptSubject, promptClass, currentPromptText);
+      showToast(`"${promptClass}" শ্রেণির "${promptSubject}" বিষয়ের প্রম্পট সফলভাবে সংরক্ষণ করা হয়েছে!`, 'success');
+    }
+    setIsPromptDirty(false);
+    setIsCurrentCustomized(true);
+  };
+
+  const handleResetPrompt = () => {
+    if (promptEditorMode === 'universal') {
+      if (confirm('আপনি কি নিশ্চিত যে সার্বজনীন নির্দেশনা ডিফল্ট মানে রিসেট করতে চান?')) {
+        resetUniversalRules();
+        setCurrentPromptText(DEFAULT_UNIVERSAL_RULES);
+        setIsCurrentCustomized(false);
+        setIsPromptDirty(false);
+        showToast('সার্বজনীন নির্দেশনা ডিফল্ট মানে রিসেট করা হয়েছে।', 'success');
+      }
+    } else {
+      if (confirm(`আপনি কি "${promptClass}" শ্রেণির "${promptSubject}" বিষয়ের প্রম্পট ডিফল্ট অবস্থায় রিসেট করতে চান?`)) {
+        resetCustomPrompt(promptSubject, promptClass);
+        const def = loadCustomPrompt(promptSubject, promptClass);
+        setCurrentPromptText(def);
+        setIsCurrentCustomized(false);
+        setIsPromptDirty(false);
+        showToast(`"${promptSubject}" বিষয়ের প্রম্পট ডিফল্ট মানে রিসেট করা হয়েছে।`, 'success');
+      }
+    }
+  };
+
+  const handleGeneratePromptWithAi = async () => {
+    if (!promptIdeaInput.trim()) {
+      showToast('অনুগ্রহ করে আপনার নির্দেশ বা প্রশ্নের বিবরণ লিখুন।', 'error');
+      return;
+    }
+
+    const apiKey = adminApiKey?.trim() || 
+      (typeof window !== 'undefined' ? localStorage.getItem('gemini_api_key') : '') || 
+      process.env.NEXT_PUBLIC_GEMINI_API_KEY || 
+      '';
+
+    if (!apiKey) {
+      showToast('Gemini API Key পাওয়া যায়নি। দয়া করে .env.local ফাইলে NEXT_PUBLIC_GEMINI_API_KEY দিন অথবা সেটিংসে কি বসান।', 'error');
+      return;
+    }
+
+    try {
+      setIsGeneratingPromptWithAi(true);
+      setGeneratingPromptStatus('AI আপনার নির্দেশাবলী বিশ্লেষণ করে প্রম্পট তৈরি করছে...');
+
+      const isUniversal = promptEditorMode === 'universal';
+      const currentTarget = isUniversal ? 'সকল বিষয়ের সার্বজনীন নিয়মাবলী' : `শ্রেণি: ${promptClass}, বিষয়: ${promptSubject}`;
+
+      const metaSystemPrompt = `You are an expert AI Prompt Engineer and Curriculum Specialist for Bangladeshi Primary & Kindergarten Schools (Classes 1 to 5).
+Your objective: Take the teacher's natural language instructions, critique, or requirements, and generate or refine a rigorous, highly-detailed Question Generator Prompt Template.
+
+Current Target: ${currentTarget}
+Teacher's Custom Requirements / Description:
+"""
+${promptIdeaInput.trim()}
+"""
+
+Existing / Base Template Reference:
+"""
+${currentPromptText}
+"""
+
+CRITICAL INSTRUCTIONS FOR PROMPT GENERATION:
+1. The generated prompt must be written in fluent, formal Bengali (or English if the subject is English), matching Bangladeshi primary NCTB & cadet school exam standards.
+2. PRESERVE ALL APPLICABLE DYNAMIC PLACEHOLDERS:
+   - {className}
+   - {subjectName}
+   - {universalRules}
+   - {sourcesBlock}
+   - {requestedSections}
+   - {customInstructions}
+3. Seamlessly incorporate every detail, rule, restriction, format, and section guideline specified by the teacher.
+4. If the teacher mentions specific section rules (e.g. 1 no. word meaning, fill in the blanks verbatim from source, decimal multiplication without integers, 3-mark questions with 2 points, 5-mark descriptive questions with demo format, page number mapping in answers), formulate them into explicit, numbered, unambiguous guidelines.
+5. Return ONLY the raw generated prompt text. Do NOT wrap in markdown \`\`\` code fences, do NOT include pleasantries, commentary, or intros/outros.`;
+
+      const payload = {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: metaSystemPrompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.3,
+        },
+      };
+
+      setGeneratingPromptStatus('উপলব্ধ Gemini AI মডেলগুলো যাচাই করা হচ্ছে...');
+      const models = await getAvailableGenerativeModels(apiKey);
+      let outputPrompt = null;
+      let lastErr = null;
+
+      for (const mName of models) {
+        try {
+          setGeneratingPromptStatus(`মডেল (${mName}) দিয়ে প্রম্পট তৈরি করা হচ্ছে...`);
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent?key=${apiKey}`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (text && text.trim()) {
+              outputPrompt = text.replace(/^```(?:markdown|text)?\s*/gi, '').replace(/\s*```$/gi, '').trim();
+              break;
+            }
+          } else {
+            const errJson = await res.json().catch(() => ({}));
+            const errMsg = errJson?.error?.message || `HTTP ${res.status}`;
+            console.warn(`Model ${mName} returned error:`, errMsg);
+            lastErr = new Error(errMsg);
+            // Continue trying the next available model
+            continue;
+          }
+        } catch (mErr) {
+          lastErr = mErr;
+          console.warn(`Model ${mName} prompt generation failed:`, mErr.message);
+        }
+      }
+
+      if (!outputPrompt) {
+        throw lastErr || new Error('AI থেকে প্রম্পট জেনারেট করা সম্ভব হয়নি।');
+      }
+
+      setCurrentPromptText(outputPrompt);
+      setIsPromptDirty(true);
+      showToast('AI আপনার বিবরণ অনুযায়ী সফলভাবে নতুন প্রম্পট তৈরি করেছে! নিচের এডিটরে এটি পর্যালোচনা করে "সংরক্ষণ করুন" চাপুন।', 'success');
+    } catch (err) {
+      console.error('AI Prompt Generation Error:', err);
+      showToast(err.message || 'AI দিয়ে প্রম্পট তৈরিতে সমস্যা হয়েছে।', 'error');
+    } finally {
+      setIsGeneratingPromptWithAi(false);
+      setGeneratingPromptStatus('');
+    }
+  };
+
+  const handleCopyPrompt = () => {
+    if (currentPromptText) {
+      navigator.clipboard.writeText(currentPromptText);
+      showToast('প্রম্পট ক্লিপবোর্ডে কপি করা হয়েছে!', 'success');
+    }
+  };
+
   // Copy SQL
   const handleCopySql = () => {
     navigator.clipboard.writeText(SUPABASE_SQL_SETUP);
@@ -1154,6 +1362,18 @@ export default function AdminPage() {
           >
             <Sparkles className="w-4 h-4 text-amber-500" />
             <span>ডেমো প্রশ্ন (AI প্যাটার্ন এনালাইসিস)</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('prompts')}
+            className={`py-3 px-4 text-sm font-bold border-b-2 flex items-center space-x-2 transition whitespace-nowrap ${
+              activeTab === 'prompts'
+                ? 'border-indigo-600 text-indigo-700 bg-indigo-50/40 font-extrabold'
+                : 'border-transparent text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <FileCode className="w-4 h-4 text-indigo-600" />
+            <span>AI প্রম্পট এডিটর</span>
           </button>
 
           <button
@@ -2795,6 +3015,353 @@ export default function AdminPage() {
                     </p>
                   </div>
                 )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB: Prompts Management & Editor */}
+        {activeTab === 'prompts' && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-5 sm:p-6 space-y-6">
+              {/* Header */}
+              <div className="border-b border-slate-100 pb-4 flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center space-x-3">
+                  <div className="p-2.5 bg-indigo-100 text-indigo-700 rounded-xl">
+                    <Sparkles className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                      <span>AI প্রশ্ন তৈরির প্রম্পট ব্যবস্থাপনা ও এডিটর</span>
+                      {isCurrentCustomized ? (
+                        <span className="text-xs font-bold bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-full border border-emerald-300">
+                          কাস্টমাইজড প্রম্পট সক্রিয়
+                        </span>
+                      ) : (
+                        <span className="text-xs font-bold bg-slate-100 text-slate-600 px-2.5 py-0.5 rounded-full border border-slate-200">
+                          ডিফল্ট প্রম্পট সক্রিয়
+                        </span>
+                      )}
+                    </h2>
+                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
+                      শ্রেণি ও বিষয়ভিত্তিক প্রম্পট নির্দেশিকা কাস্টমাইজ করুন। আপনার স্কুলের নিয়ম অনুযায়ী যেকোনো ধারার শর্ত পরিবর্তন করতে পারবেন।
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <button
+                    type="button"
+                    onClick={handleCopyPrompt}
+                    className="inline-flex items-center px-3 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition"
+                    title="প্রম্পট টেক্সট কপি করুন"
+                  >
+                    <Copy className="w-3.5 h-3.5 mr-1.5" />
+                    কপি
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleResetPrompt}
+                    className="inline-flex items-center px-3 py-2 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition"
+                    title="ডিফল্ট প্রম্পটে রিসেট করুন"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
+                    ডিফল্টে রিসেট
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleSavePrompt}
+                    className="inline-flex items-center px-5 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99] rounded-xl shadow-xs transition space-x-1.5"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>প্রম্পট সংরক্ষণ করুন</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Selector Bar */}
+              <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl space-y-4">
+                {/* Mode Selector */}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-bold text-slate-600">প্রম্পট ধরন:</span>
+                    <div className="inline-flex bg-slate-200/80 p-1 rounded-xl">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPromptEditorMode('subject');
+                          refreshPromptEditor(promptClass, promptSubject, 'subject');
+                        }}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-lg transition ${
+                          promptEditorMode === 'subject'
+                            ? 'bg-white text-indigo-700 shadow-xs font-extrabold'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        বিষয়ভিত্তিক প্রম্পট (Subject Prompt)
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPromptEditorMode('universal');
+                          refreshPromptEditor(promptClass, promptSubject, 'universal');
+                        }}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-lg transition ${
+                          promptEditorMode === 'universal'
+                            ? 'bg-white text-indigo-700 shadow-xs font-extrabold'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        সার্বজনীন নিয়মাবলী (Universal Rules for All)
+                      </button>
+                    </div>
+                  </div>
+
+                  {isPromptDirty && (
+                    <span className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1 rounded-lg animate-pulse flex items-center">
+                      <AlertCircle className="w-3.5 h-3.5 mr-1" />
+                      অসংরক্ষিত পরিবর্তন রয়েছে!
+                    </span>
+                  )}
+                </div>
+
+                {/* Class and Subject selection (if Subject mode) */}
+                {promptEditorMode === 'subject' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-200/80">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        শ্রেণি নির্বাচন করুন
+                      </label>
+                      <select
+                        value={promptClass}
+                        onChange={(e) => {
+                          const newCls = e.target.value;
+                          setPromptClass(newCls);
+                          const subs = loadSubjectsForClass(newCls);
+                          const newSub = subs.includes(promptSubject) ? promptSubject : (subs[0] || 'বাংলা');
+                          setPromptSubject(newSub);
+                          refreshPromptEditor(newCls, newSub, 'subject');
+                        }}
+                        className="w-full text-sm font-bold bg-white border border-slate-300 rounded-xl px-3.5 py-2.5 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      >
+                        {classesList.map((cls) => (
+                          <option key={cls} value={cls}>
+                            {cls} শ্রেণি
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        বিষয় নির্বাচন করুন
+                      </label>
+                      <select
+                        value={promptSubject}
+                        onChange={(e) => {
+                          const newSub = e.target.value;
+                          setPromptSubject(newSub);
+                          refreshPromptEditor(promptClass, newSub, 'subject');
+                        }}
+                        className="w-full text-sm font-bold bg-white border border-slate-300 rounded-xl px-3.5 py-2.5 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      >
+                        {loadSubjectsForClass(promptClass).map((sub) => (
+                          <option key={sub} value={sub}>
+                            {sub}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* AI Prompt Assistant Natural Language Box */}
+              <div className="bg-gradient-to-br from-amber-50/90 via-indigo-50/60 to-white border-2 border-amber-300/80 rounded-2xl p-5 sm:p-6 space-y-4 shadow-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200/60 pb-3">
+                  <div className="flex items-center space-x-3">
+                    <div className="p-2.5 bg-gradient-to-r from-amber-500 to-indigo-600 text-white rounded-xl shadow-xs">
+                      <Sparkles className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                        <span>আপনার ভাষায় বর্ণনা দিয়ে AI প্রম্পট তৈরি করুন</span>
+                        <span className="text-xs bg-amber-200 text-amber-900 font-extrabold px-2.5 py-0.5 rounded-full border border-amber-300">
+                          AI Prompt Generator
+                        </span>
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        প্রশ্ন কেমন হবে, কী নিয়ম মানতে হবে বা কী বাদ দিতে হবে তা নিচের বক্সে আপনার নিজের ভাষায় লিখুন।
+                      </p>
+                    </div>
+                  </div>
+
+                  {promptIdeaInput && (
+                    <button
+                      type="button"
+                      onClick={() => setPromptIdeaInput('')}
+                      className="text-xs font-semibold text-slate-500 hover:text-slate-800 px-2.5 py-1 rounded-lg hover:bg-slate-200/60 transition"
+                    >
+                      লেখা মুছুন
+                    </button>
+                  )}
+                </div>
+
+                {/* Natural Language Prompt Input Area */}
+                <div className="relative">
+                  <textarea
+                    value={promptIdeaInput}
+                    onChange={(e) => setPromptIdeaInput(e.target.value)}
+                    rows={4}
+                    placeholder={`এখানে আপনার নিজের ভাষায় বিস্তারিত লিখুন... যেমন:\n"১ নং এ কোনো পৃষ্ঠা নম্বর দেওয়া যাবে না। ২ নং এ ৩ নম্বরের জন্য অবশ্যই ২টি কারণ বা উদাহরণ যোগ করতে হবে। ৫ নং এ কঠিন অঙ্ক দেওয়া যাবে না এবং সোর্স টেক্সটের বাইরে কোনো প্রশ্ন তৈরি করা যাবে না..."`}
+                    className="w-full text-sm leading-relaxed p-4 bg-white border border-amber-300 rounded-xl focus:ring-2 focus:ring-amber-500 focus:outline-none shadow-inner text-slate-900 placeholder:text-slate-400 font-medium"
+                  />
+                </div>
+
+                {/* Quick Suggested Chips */}
+                <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                  <span className="text-xs font-bold text-slate-600 mr-1 flex items-center">
+                    <Plus className="w-3.5 h-3.5 mr-0.5 text-indigo-600" />
+                    দ্রুত শর্ত যোগ করুন:
+                  </span>
+                  {[
+                    'প্রশ্নের উত্তর প্রাথমিক শ্রেণির উপযোগী সহজ ও সাবলীল ভাষায় হবে',
+                    'উত্তরমালায় অনুশীলনীতে থাকা পৃষ্ঠা নম্বর সঠিকভাবে উল্লেখ থাকবে',
+                    'সোর্স থেকে হুবহু লাইন নিয়ে শূন্যস্থান পূরণ তৈরি করতে হবে',
+                    'বেশি কঠিন বা জটিল প্রশ্ন পরিহার করে মানসম্মত প্রশ্ন করুন',
+                    '৩ নম্বরের প্রশ্নে সংজ্ঞা ও ২টি পয়েন্টের উত্তর থাকবে',
+                    '১ নং প্রশ্নে বা উত্তরমালায় কোনো পৃষ্ঠা নম্বর থাকবে না'
+                  ].map((idea, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => {
+                        setPromptIdeaInput((prev) => (prev ? `${prev}\n• ${idea}` : `• ${idea}`));
+                      }}
+                      className="text-xs bg-white hover:bg-amber-100/80 border border-slate-200 hover:border-amber-400 text-slate-700 font-medium px-2.5 py-1 rounded-lg transition active:scale-95 shadow-2xs"
+                    >
+                      + {idea}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Action Generate Button */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+                  <span className="text-xs text-slate-500">
+                    💡 বাটন চাপলে AI স্বয়ংক্রিয়ভাবে একটি পূর্ণাঙ্গ প্রম্পট কাঠামো বানিয়ে নিচের এডিটরে বসিয়ে দেবে।
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={handleGeneratePromptWithAi}
+                    disabled={isGeneratingPromptWithAi || !promptIdeaInput.trim()}
+                    className="px-6 py-3 bg-gradient-to-r from-amber-600 via-indigo-600 to-indigo-700 hover:from-amber-700 hover:to-indigo-800 disabled:opacity-50 text-white text-sm font-bold rounded-xl shadow-xs transition flex items-center space-x-2 active:scale-[0.99]"
+                  >
+                    {isGeneratingPromptWithAi ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>{generatingPromptStatus || 'AI দিয়ে প্রম্পট তৈরি হচ্ছে...'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4 text-amber-300" />
+                        <span>AI দিয়ে প্রম্পট তৈরি / আপডেট করুন</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Dynamic Variables Guide Banner */}
+              <div className="p-4 bg-indigo-50/70 border border-indigo-200/80 rounded-2xl space-y-2 text-xs text-indigo-950">
+                <div className="flex items-center space-x-2 font-bold text-indigo-900">
+                  <Sparkles className="w-4 h-4 text-indigo-600" />
+                  <span>প্রম্পটে ব্যবহৃত ডায়নামিক প্লেসহোল্ডার সহায়িকা:</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1 font-mono text-[11px]">
+                  <div className="bg-white/80 p-2 rounded-lg border border-indigo-100">
+                    <span className="font-bold text-indigo-700">{'{className}'}</span>
+                    <p className="text-slate-600 font-sans text-[11px] mt-0.5">শ্রেণির নাম (যেমন: পঞ্চম)</p>
+                  </div>
+                  <div className="bg-white/80 p-2 rounded-lg border border-indigo-100">
+                    <span className="font-bold text-indigo-700">{'{subjectName}'}</span>
+                    <p className="text-slate-600 font-sans text-[11px] mt-0.5">বিষয়ের নাম (যেমন: প্রাথমিক গণিত)</p>
+                  </div>
+                  <div className="bg-white/80 p-2 rounded-lg border border-indigo-100">
+                    <span className="font-bold text-indigo-700">{'{universalRules}'}</span>
+                    <p className="text-slate-600 font-sans text-[11px] mt-0.5">সার্বজনীন সুষম বণ্টন ও ডেমো রুলস</p>
+                  </div>
+                  <div className="bg-white/80 p-2 rounded-lg border border-indigo-100">
+                    <span className="font-bold text-indigo-700">{'{sourcesBlock}'}</span>
+                    <p className="text-slate-600 font-sans text-[11px] mt-0.5">সোর্স টেক্সট, নোট ও অধ্যায় তালিকা</p>
+                  </div>
+                  <div className="bg-white/80 p-2 rounded-lg border border-indigo-100">
+                    <span className="font-bold text-indigo-700">{'{requestedSections}'}</span>
+                    <p className="text-slate-600 font-sans text-[11px] mt-0.5">অনুরোধকৃত ধারাসমূহ ও প্রশ্নের সংখ্যা</p>
+                  </div>
+                  <div className="bg-white/80 p-2 rounded-lg border border-indigo-100">
+                    <span className="font-bold text-indigo-700">{'{customInstructions}'}</span>
+                    <p className="text-slate-600 font-sans text-[11px] mt-0.5">শিক্ষকের অতিরিক্ত বিশেষ নির্দেশনা</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Editor Textarea */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                    <span>প্রম্পট টেক্সট এডিটর:</span>
+                    <span className="text-xs font-semibold text-slate-500">
+                      ({promptEditorMode === 'universal' ? 'সার্বজনীন নির্দেশাবলী' : `শ্রেণি: ${promptClass} • বিষয়: ${promptSubject}`})
+                    </span>
+                  </label>
+                  <span className="text-xs text-slate-500 font-mono">
+                    অক্ষর: {currentPromptText.length} | লাইন: {currentPromptText.split('\n').length}
+                  </span>
+                </div>
+
+                <div className="relative">
+                  <textarea
+                    value={currentPromptText}
+                    onChange={(e) => {
+                      setCurrentPromptText(e.target.value);
+                      setIsPromptDirty(true);
+                    }}
+                    rows={20}
+                    className="w-full font-mono text-sm leading-relaxed p-4 bg-slate-50 border border-slate-300 rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none transition shadow-inner text-slate-900"
+                    placeholder="এখানে প্রম্পট লিখুন বা এডিট করুন..."
+                    spellCheck={false}
+                  />
+                </div>
+              </div>
+
+              {/* Bottom Action Footer */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
+                <p className="text-xs text-slate-500">
+                  ⚠️ নোট: প্রম্পট পরিবর্তন করার পর "প্রম্পট সংরক্ষণ করুন" বাটনে ক্লিক করলে তা সরাসরি মূল প্রশ্ন জেনারেটরে কার্যকর হবে।
+                </p>
+
+                <div className="flex items-center space-x-2">
+                  <button
+                    type="button"
+                    onClick={handleResetPrompt}
+                    className="px-4 py-2 text-xs font-bold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition"
+                  >
+                    ডিফল্টে ফিরিয়ে নিন
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleSavePrompt}
+                    className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99] text-white text-sm font-bold rounded-xl shadow-xs transition flex items-center space-x-1.5"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>সংরক্ষণ করুন</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
