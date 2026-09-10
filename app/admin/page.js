@@ -78,6 +78,9 @@ import {
   saveSectionsForSubject,
   resetSectionsToDefault,
   DEFAULT_CURRICULUM_PRESETS,
+  loadPageOffset,
+  savePageOffset,
+  loadAllPageOffsets,
 } from '@/lib/curriculumPresets';
 import {
   loadCustomPrompt,
@@ -109,6 +112,9 @@ export default function AdminPage() {
   const [selectedClass, setSelectedClass] = useState('পঞ্চম');
   const [subjectsList, setSubjectsList] = useState([]);
   const [selectedSubject, setSelectedSubject] = useState('বিজ্ঞান');
+
+  // Page Offsets state (per class & subject subtraction value)
+  const [pageOffsets, setPageOffsets] = useState({});
 
   // AI Prompts Management State
   const [promptClass, setPromptClass] = useState('পঞ্চম');
@@ -238,6 +244,9 @@ export default function AdminPage() {
     const savedApiKey = localStorage.getItem('gemini_api_key') || '';
     setAdminApiKey(savedApiKey);
 
+    // Load all page offsets
+    setPageOffsets(loadAllPageOffsets());
+
     // Load all sources
     refreshSources();
   }, [isAuthenticated]);
@@ -272,7 +281,7 @@ export default function AdminPage() {
     }
   }, [selectedManageClass]);
 
-  // Sync classes and subjects on external update events
+  // Sync classes, subjects and page offsets on external update events
   useEffect(() => {
     const handleClassesUpdated = () => {
       const cls = loadClassesList();
@@ -287,14 +296,30 @@ export default function AdminPage() {
         setSubjectsList(loadSubjectsForClass(selectedClass));
       }
     };
+    const handleOffsetsUpdated = () => {
+      setPageOffsets(loadAllPageOffsets());
+    };
 
     window.addEventListener('exam_classes_updated', handleClassesUpdated);
     window.addEventListener('exam_subjects_updated', handleSubjectsUpdated);
+    window.addEventListener('exam_page_offset_updated', handleOffsetsUpdated);
     return () => {
       window.removeEventListener('exam_classes_updated', handleClassesUpdated);
       window.removeEventListener('exam_subjects_updated', handleSubjectsUpdated);
+      window.removeEventListener('exam_page_offset_updated', handleOffsetsUpdated);
     };
   }, [selectedManageClass, selectedClass]);
+
+  // Handle page offset update for a subject
+  const handleUpdatePageOffset = (clsName, subName, val) => {
+    const key = `${clsName}_${subName}`;
+    const num = val === '' ? '' : parseInt(val, 10);
+    setPageOffsets((prev) => ({ ...prev, [key]: num }));
+    if (val !== '') {
+      savePageOffset(clsName, subName, num);
+      showToast(`"${clsName}" শ্রেণির "${subName}" বিষয়ের পৃষ্ঠা অফসেট ${num || 0} পৃষ্ঠা সেট হয়েছে!`);
+    }
+  };
 
   // --- Class Management Handlers ---
   const handleAddClass = () => {
@@ -2395,9 +2420,40 @@ CRITICAL INSTRUCTIONS FOR PROMPT GENERATION:
                             )}
                           </div>
 
-                          {/* Actions */}
+                          {/* Page Offset Input & Actions */}
                           {!isEditing && (
-                            <div className="flex items-center space-x-1 shrink-0">
+                            <div className="flex items-center space-x-2 shrink-0">
+                              {/* PDF Page Offset Input */}
+                              <div
+                                className="flex items-center space-x-1.5 bg-amber-50/90 border border-amber-200/90 px-2 py-1 rounded-lg shadow-2xs"
+                                title="পিডিএফ পৃষ্ঠা নম্বর থেকে যত বিয়োগ করে বইয়ের পৃষ্ঠা নম্বর উত্তরে দেখানো হবে"
+                              >
+                                <span className="text-[11px] font-bold text-amber-900 whitespace-nowrap">
+                                  পিডিএফ অফসেট: -
+                                </span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="500"
+                                  value={
+                                    pageOffsets[`${selectedManageClass}_${subName}`] !== undefined
+                                      ? pageOffsets[`${selectedManageClass}_${subName}`]
+                                      : (loadPageOffset(selectedManageClass, subName) || 0)
+                                  }
+                                  onFocus={(e) => e.target.select()}
+                                  onChange={(e) =>
+                                    handleUpdatePageOffset(selectedManageClass, subName, e.target.value)
+                                  }
+                                  onBlur={(e) => {
+                                    if (e.target.value === '') {
+                                      handleUpdatePageOffset(selectedManageClass, subName, 0);
+                                    }
+                                  }}
+                                  className="w-10 text-center text-xs font-bold bg-white border border-amber-300 rounded px-1 py-0.5 text-amber-950 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                                />
+                                <span className="text-[10px] text-amber-800 font-semibold">পৃষ্ঠা</span>
+                              </div>
+
                               <button
                                 onClick={() => handleMoveSubject(idx, 'up')}
                                 disabled={idx === 0}

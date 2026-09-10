@@ -45,8 +45,6 @@ Task:
 2. For each attached page image, precede its extracted content with its exact source header, formatted as:
 === [সোর্স পৃষ্ঠা: "<sourceTitle>"] ===
 Where <sourceTitle> is the exact label given in "=== START IMAGE X: "<sourceTitle>" ===".
-Also, if a physical printed textbook page number is visible on the page (e.g. at the bottom or top of the page), explicitly write:
-[বইয়ের মুদ্রিত পৃষ্ঠা: <পৃষ্ঠা নম্বর>]
 Preserve all chapter titles, exercise section numbers (e.g. অনুশীলনী ১, অনুশীলনী ২, ৩, ৪) and question numbers (e.g. ১ এর (১), ২ এর ক, ৩) exactly as printed on each page.
 3. DO NOT generate new questions, do not summarize, and do not output JSON.
 4. Output ONLY the raw extracted plain text content organized under the page headers.`;

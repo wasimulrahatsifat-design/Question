@@ -15,7 +15,9 @@ import {
   loadSectionsForSubject, 
   saveSectionsForSubject, 
   resetSectionsToDefault,
-  DEFAULT_CURRICULUM_PRESETS 
+  DEFAULT_CURRICULUM_PRESETS,
+  loadPageOffset,
+  applyPageOffsetToAnswer,
 } from '../lib/curriculumPresets';
 import { 
   getSources, 
@@ -85,6 +87,26 @@ const cleanCompositionDisplay = (text) => {
   return `Write a composition about “${t}”`;
 };
 
+export function getAutoExamTitle(date = new Date()) {
+  const month = date.getMonth(); // 0 = Jan, 1 = Feb, 2 = Mar, ..., 11 = Dec
+  const year = date.getFullYear();
+  const bnYear = toBengaliNumerals(year);
+
+  if (month >= 0 && month <= 2) {
+    // জানুয়ারি থেকে মার্চ: ১ম সেমিস্টার
+    return `১ম সেমিস্টার পরীক্ষা- ${bnYear} ইং`;
+  } else if (month >= 3 && month <= 5) {
+    // এপ্রিল থেকে জুন: ২য় সেমিস্টার
+    return `২য় সেমিস্টার পরীক্ষা- ${bnYear} ইং`;
+  } else if (month >= 6 && month <= 8) {
+    // জুলাই থেকে সেপ্টেম্বর: ৩য় সেমিস্টার
+    return `৩য় সেমিস্টার পরীক্ষা- ${bnYear} ইং`;
+  } else {
+    // অক্টোবর থেকে ডিসেম্বর: বার্ষিক
+    return `বার্ষিক পরীক্ষা- ${bnYear} ইং`;
+  }
+}
+
 export default function PdfQuestionGeneratorPage() {
   // Classes List
   const [classesList, setClassesList] = useState(() => loadClassesList());
@@ -93,7 +115,7 @@ export default function PdfQuestionGeneratorPage() {
   const [language, setLanguage] = useState('bn');
   const [schoolName, setSchoolName] = useState('শওকত ভূঁইয়া চাইল্ড কেয়ার হোমস্');
   const [schoolSubtitle, setSchoolSubtitle] = useState('প্রি-ক্যাডেট চাইল্ড কেয়ার হোমস্');
-  const [examTitle, setExamTitle] = useState('২য় সেমিস্টার পরীক্ষা- ২০২৬ ইং');
+  const [examTitle, setExamTitle] = useState(() => getAutoExamTitle());
   const [selectedClass, setSelectedClass] = useState('পঞ্চম');
   
   // Subjects for the currently selected class
@@ -327,9 +349,13 @@ export default function PdfQuestionGeneratorPage() {
 
   const getHeaderExamTitle = () => {
     if (!isEnglish) return examTitle;
-    if (examTitle.includes('৩য়') || examTitle.toLowerCase().includes('3rd')) return '3ʳᵈ Semester Examination- 2026';
-    if (examTitle.includes('১ম') || examTitle.toLowerCase().includes('1st')) return '1ˢᵗ Semester Examination- 2026';
-    return '2ⁿᵈ Semester Examination- 2026';
+    const yearMatch = (examTitle || '').match(/\d{4}|[\u09E6-\u09EF]{4}/);
+    const yr = yearMatch ? yearMatch[0].replace(/[\u09E6-\u09EF]/g, (d) => '০১২৩৪৫৬৭৮৯'.indexOf(d)) : new Date().getFullYear();
+    if (examTitle.includes('বার্ষিক') || examTitle.toLowerCase().includes('annual')) return `Annual Examination- ${yr}`;
+    if (examTitle.includes('৩য়') || examTitle.toLowerCase().includes('3rd')) return `3ʳᵈ Semester Examination- ${yr}`;
+    if (examTitle.includes('১ম') || examTitle.toLowerCase().includes('1st')) return `1ˢᵗ Semester Examination- ${yr}`;
+    if (examTitle.includes('২য়') || examTitle.toLowerCase().includes('2nd')) return `2ⁿᵈ Semester Examination- ${yr}`;
+    return examTitle;
   };
 
   const getHeaderSubjectName = () => {
@@ -801,15 +827,15 @@ export default function PdfQuestionGeneratorPage() {
             // fallback if no chapter specifically checked
             selectedItems.push({
               source: src,
-              startPage: cfg.startPage || 1,
-              endPage: cfg.endPage || 1,
+              startPage: Number(cfg.startPage) || 1,
+              endPage: Number(cfg.endPage) || src.pageCount || 1,
             });
           }
         } else {
           selectedItems.push({
             source: src,
-            startPage: cfg.startPage || 1,
-            endPage: cfg.endPage || 1,
+            startPage: Number(cfg.startPage) || 1,
+            endPage: Number(cfg.endPage) || src.pageCount || 1,
           });
         }
       }
@@ -863,7 +889,9 @@ export default function PdfQuestionGeneratorPage() {
           }
 
           // Fallback or non-chapter / custom page range / image / text source
-          const pageRangeStr = (cfg.startPage && cfg.endPage) ? ` (পৃষ্ঠা ${cfg.startPage}-${cfg.endPage})` : '';
+          const stPg = Number(cfg.startPage) || 1;
+          const endPg = Number(cfg.endPage) || foundSrc.pageCount || 1;
+          const pageRangeStr = (cfg.startPage && cfg.endPage) ? ` (পৃষ্ঠা ${stPg}-${endPg})` : '';
           titleParts.push(`${foundSrc.title}${pageRangeStr}`);
           const existingItem = selectedItems.find((item) => item.source.id === foundSrc.id);
           if (existingItem) {
@@ -872,18 +900,18 @@ export default function PdfQuestionGeneratorPage() {
             }
             if (cfg.startPage && cfg.endPage) {
               existingItem.customPageRanges.push({
-                startPage: cfg.startPage,
-                endPage: cfg.endPage,
+                startPage: stPg,
+                endPage: endPg,
               });
             }
             existingItem.hasPageRangeFallback = true;
           } else {
             selectedItems.push({
               source: foundSrc,
-              startPage: cfg.startPage || 1,
-              endPage: cfg.endPage || foundSrc.pageCount || 1,
+              startPage: stPg,
+              endPage: endPg,
               hasPageRangeFallback: true,
-              customPageRanges: (cfg.startPage && cfg.endPage) ? [{ startPage: cfg.startPage, endPage: cfg.endPage }] : [],
+              customPageRanges: (cfg.startPage && cfg.endPage) ? [{ startPage: stPg, endPage: endPg }] : [],
             });
           }
         });
@@ -954,6 +982,8 @@ export default function PdfQuestionGeneratorPage() {
         process.env.NEXT_PUBLIC_GEMINI_API_KEY || 
         '';
 
+      const currentOffset = loadPageOffset(selectedClass, selectedSubject);
+
       const resultData = await generateQuestionsDirectly({
         images,
         textSources,
@@ -963,6 +993,7 @@ export default function PdfQuestionGeneratorPage() {
         mainSourceTitle: mainSourceTitleStr,
         customInstructions: '',
         apiKey: effectiveApiKey,
+        pageOffset: currentOffset,
         onStatusChange: (msg) => setStatusMessage(msg),
       });
 
@@ -982,7 +1013,9 @@ export default function PdfQuestionGeneratorPage() {
             { questionText: '১০.৫ ÷ ৫', answer: '২.১' },
           ];
 
-          const isEnglish2ndSec = isEnglish && (sec.id?.includes('def') || sec.id?.includes('qa') || sec.id?.includes('questions') || sec.id?.includes('grammar') || sec.title?.includes('সংজ্ঞা') || sec.title?.includes('কাকে বলে') || sec.title?.toLowerCase().includes('answer the following') || sec.title?.toLowerCase().includes('question'));
+                    const isEnglish = Boolean(selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english')));
+          const isEnglish2nd = isEnglish && (selectedSubject?.includes('২য়') || selectedSubject?.includes('2nd') || selectedSubject?.includes('grammar') || selectedSubject?.includes('ব্যাকরণ'));
+          const isEnglish2ndSec = isEnglish && (isEnglish2nd || sec.id?.startsWith('en2_') || sec.id?.includes('grammar') || sec.id?.includes('def')) && (sec.id?.includes('def') || sec.title?.includes('সংজ্ঞা') || sec.title?.includes('কাকে বলে') || sec.title?.includes('ব্যাকরণ')) && !sec.id?.includes('en_questions') && !sec.id?.includes('en_punctuation') && !sec.id?.includes('en_word_meaning');
 
           (sec.questions || []).forEach((q, qIdx) => {
             q.questionText = cleanQuestionText(q.questionText);
@@ -990,7 +1023,23 @@ export default function PdfQuestionGeneratorPage() {
               q.questionText = fixBilingualGrammarQuestion(q.questionText);
               q.answer = ensureBengaliGrammarAnswer(q.questionText, q.answer);
             }
-            if (isMathShort && q.answer) {
+                        if (isEnglish && q.answer) {
+              q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\]\)]\s*/gi, '').trim();
+            }
+            const isBangla2nd = selectedSubject && (selectedSubject.includes('বাংলা ২য়') || selectedSubject.includes('বাংলা ২') || selectedSubject.toLowerCase().includes('bangla 2nd') || selectedSubject.includes('ব্যাকরণ'));
+            if (isBangla2nd && q.answer) {
+              q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\)\]]\s*/gi, '').trim();
+            }
+            const isComp = selectedSubject && (selectedSubject.includes('কম্পিউটার') || selectedSubject.toLowerCase().includes('computer') || selectedSubject.toLowerCase().includes('ict') || selectedSubject.includes('আইসিটি'));
+            if (isComp && q.answer) {
+              q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\)\]]\s*/gi, '').trim();
+            }
+            const isGk = selectedSubject && (selectedSubject.includes('সাধারণ জ্ঞান') || selectedSubject.toLowerCase().includes('general knowledge') || selectedSubject.toLowerCase().includes('gk') || selectedSubject.includes('জিকে'));
+            if (isGk && q.answer) {
+              q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\)\]]\s*/gi, '').trim();
+            }
+            const isMathWordProb = isMath && (sec.id?.startsWith('math_word_prob') || sec.id?.startsWith('math_problem') || sec.title?.includes('গাণিতিক সমস্যা')) && !sec.id?.includes('math_mul_div') && !sec.id?.includes('math_add_sub') && !sec.id?.includes('math_table') && !sec.id?.includes('math_multiplication_table') && !sec.id?.includes('math_short') && !sec.id?.includes('math_blank_box') && !sec.id?.includes('math_geom');
+            if (isMath && !isMathWordProb && q.answer) {
               q.answer = String(q.answer).replace(/[\(\[]\s*পৃষ্ঠা[^\]\)]*[\)\]]\s*/gi, '').trim();
             }
             if (isMathDecimal) {
@@ -1138,7 +1187,9 @@ export default function PdfQuestionGeneratorPage() {
       }
 
       if (result.refinedAnswer) {
-        handleAnswerTextChange(sectionIndex, qIndex, result.refinedAnswer);
+        const currentOffset = loadPageOffset(selectedClass, selectedSubject);
+        const adjusted = applyPageOffsetToAnswer(result.refinedAnswer, currentOffset);
+        handleAnswerTextChange(sectionIndex, qIndex, adjusted);
       }
       setCustomPromptOpenKey(null);
       setCustomPromptText('');
@@ -1295,10 +1346,21 @@ export default function PdfQuestionGeneratorPage() {
     const isMatchSec = secType === 'match';
     const isMcq = secType === 'mcq' || (section.questions?.[0]?.options?.length > 0);
 
-    const isInlineComma = isVocab || isSentence || isConjunct || isOpposite || isOneWord || isSynonym || isBagdhara;
+    const isCompSub = selectedSubject && (selectedSubject.includes('কম্পিউটার') || selectedSubject.toLowerCase().includes('computer') || selectedSubject.toLowerCase().includes('ict') || selectedSubject.includes('আইসিটি'));
+    const isJumble = secType === 'jumble';
+    const isInlineComma = isVocab || isSentence || isConjunct || isOpposite || isOneWord || isSynonym || isBagdhara || isJumble || (isCompSub && (sIndex === 0 || sIndex === 1));
     const isSinglePrompt = isPunctuation || isLetter || isEssay || isComposition || isSummary || isAmplification || ((section.id?.includes('theme') || section.id?.includes('desc') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('বর্ণনামূলক') || section.title?.includes('দরখাস্ত') || section.title?.includes('চিঠি')) && section.questions?.length <= 1) || (section.questions?.length === 1 && !isMcq);
 
-    const isSingleMathProblem = section.questions?.length === 1 && (section.id?.startsWith('math_word') || section.id?.startsWith('math_problem') || section.id === 'math_lcm_gcd');
+    const isSingleMathProblem = section.questions?.length === 1 && (
+      section.id?.startsWith('math_word') ||
+      section.id?.startsWith('math_problem') ||
+      section.id === 'math_lcm_gcd' ||
+      section.id === 'math_multiplication_table' ||
+      section.id === 'math_table' ||
+      section.id?.includes('table') ||
+      section.id?.includes('multiplication') ||
+      section.title?.includes('নামতা')
+    );
     const isMathGrid = (
       section.id === 'math_blank_box' ||
       section.id === 'math_mul_div' ||
@@ -1569,7 +1631,8 @@ export default function PdfQuestionGeneratorPage() {
                     : (isEnglish ? `${enLetters[qIndex] || `(${qIndex + 1})`} ` : `${bnLetters[qIndex] || `(${qIndex + 1})`} `));
               
               let qVal = cleanQuestionText(q.questionText);
-              if (isEnglish && (secType === 'qa' || secType === 'generic') && (qVal.toLowerCase().includes('what is') || qVal.toLowerCase().includes('what are') || qVal.toLowerCase().includes('how many') || qVal.toLowerCase().includes('define'))) {
+              const isGrammarSec = isEnglish && (section.id?.startsWith('en2_') || section.id?.includes('grammar') || section.id?.includes('def') || section.title?.includes('সংজ্ঞা') || section.title?.includes('কাকে বলে'));
+              if (isGrammarSec && (secType === 'qa' || secType === 'generic') && (qVal.toLowerCase().includes('what is') || qVal.toLowerCase().includes('what are') || qVal.toLowerCase().includes('how many') || qVal.toLowerCase().includes('define'))) {
                 qVal = fixBilingualGrammarQuestion(qVal);
               }
 
@@ -2002,30 +2065,48 @@ export default function PdfQuestionGeneratorPage() {
                                           type="number"
                                           min="1"
                                           max={src.pageCount || 999}
-                                          value={cfg.startPage || 1}
+                                          value={cfg.startPage !== undefined ? cfg.startPage : 1}
+                                          onFocus={(e) => e.target.select()}
                                           onChange={(e) => {
-                                            const val = Math.max(1, parseInt(e.target.value) || 1);
+                                            const raw = e.target.value;
                                             setSelectedSourceConfigs((prev) => ({
                                               ...prev,
-                                              [src.id]: { ...cfg, startPage: val },
+                                              [src.id]: { ...cfg, startPage: raw === '' ? '' : parseInt(raw, 10) },
                                             }));
                                           }}
-                                          className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold"
+                                          onBlur={() => {
+                                            if (cfg.startPage === '' || !cfg.startPage || Number(cfg.startPage) < 1) {
+                                              setSelectedSourceConfigs((prev) => ({
+                                                ...prev,
+                                                [src.id]: { ...cfg, startPage: 1 },
+                                              }));
+                                            }
+                                          }}
+                                          className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none"
                                         />
                                         <span className="text-slate-400">থেকে</span>
                                         <input
                                           type="number"
-                                          min={cfg.startPage || 1}
+                                          min={Number(cfg.startPage) || 1}
                                           max={src.pageCount || 999}
-                                          value={cfg.endPage || 1}
+                                          value={cfg.endPage !== undefined ? cfg.endPage : (src.pageCount || 1)}
+                                          onFocus={(e) => e.target.select()}
                                           onChange={(e) => {
-                                            const val = Math.max(cfg.startPage || 1, parseInt(e.target.value) || 1);
+                                            const raw = e.target.value;
                                             setSelectedSourceConfigs((prev) => ({
                                               ...prev,
-                                              [src.id]: { ...cfg, endPage: val },
+                                              [src.id]: { ...cfg, endPage: raw === '' ? '' : parseInt(raw, 10) },
                                             }));
                                           }}
-                                          className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold"
+                                          onBlur={() => {
+                                            if (cfg.endPage === '' || !cfg.endPage || Number(cfg.endPage) < 1) {
+                                              setSelectedSourceConfigs((prev) => ({
+                                                ...prev,
+                                                [src.id]: { ...cfg, endPage: src.pageCount || 1 },
+                                              }));
+                                            }
+                                          }}
+                                          className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none"
                                         />
                                       </div>
                                     </div>
@@ -2041,30 +2122,48 @@ export default function PdfQuestionGeneratorPage() {
                                         type="number"
                                         min="1"
                                         max={src.pageCount || 999}
-                                        value={cfg.startPage || 1}
+                                        value={cfg.startPage !== undefined ? cfg.startPage : 1}
+                                        onFocus={(e) => e.target.select()}
                                         onChange={(e) => {
-                                          const val = Math.max(1, parseInt(e.target.value) || 1);
+                                          const raw = e.target.value;
                                           setSelectedSourceConfigs((prev) => ({
                                             ...prev,
-                                            [src.id]: { ...cfg, startPage: val },
+                                            [src.id]: { ...cfg, startPage: raw === '' ? '' : parseInt(raw, 10) },
                                           }));
                                         }}
-                                        className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold"
+                                        onBlur={() => {
+                                          if (cfg.startPage === '' || !cfg.startPage || Number(cfg.startPage) < 1) {
+                                            setSelectedSourceConfigs((prev) => ({
+                                              ...prev,
+                                              [src.id]: { ...cfg, startPage: 1 },
+                                            }));
+                                          }
+                                        }}
+                                        className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none"
                                       />
                                       <span className="text-slate-400">থেকে</span>
                                       <input
                                         type="number"
-                                        min={cfg.startPage || 1}
+                                        min={Number(cfg.startPage) || 1}
                                         max={src.pageCount || 999}
-                                        value={cfg.endPage || 1}
+                                        value={cfg.endPage !== undefined ? cfg.endPage : (src.pageCount || 1)}
+                                        onFocus={(e) => e.target.select()}
                                         onChange={(e) => {
-                                          const val = Math.max(cfg.startPage || 1, parseInt(e.target.value) || 1);
+                                          const raw = e.target.value;
                                           setSelectedSourceConfigs((prev) => ({
                                             ...prev,
-                                            [src.id]: { ...cfg, endPage: val },
+                                            [src.id]: { ...cfg, endPage: raw === '' ? '' : parseInt(raw, 10) },
                                           }));
                                         }}
-                                        className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold"
+                                        onBlur={() => {
+                                          if (cfg.endPage === '' || !cfg.endPage || Number(cfg.endPage) < 1) {
+                                            setSelectedSourceConfigs((prev) => ({
+                                              ...prev,
+                                              [src.id]: { ...cfg, endPage: src.pageCount || 1 },
+                                            }));
+                                          }
+                                        }}
+                                        className="w-12 text-center text-xs px-1.5 py-1 border border-indigo-200 rounded bg-white font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none"
                                       />
                                     </div>
                                   </div>
@@ -2375,9 +2474,11 @@ export default function PdfQuestionGeneratorPage() {
                                                   type="number"
                                                   min="1"
                                                   max={src.pageCount || 999}
-                                                  value={secCfg?.startPage || 1}
+                                                  value={secCfg?.startPage !== undefined ? secCfg.startPage : 1}
+                                                  onFocus={(e) => e.target.select()}
                                                   onChange={(e) => {
-                                                    const val = Math.max(1, parseInt(e.target.value) || 1);
+                                                    const raw = e.target.value;
+                                                    const val = raw === '' ? '' : parseInt(raw, 10);
                                                     const updated = [...sectionList];
                                                     const s = { ...updated[idx] };
                                                     const c = { ...(s.sourceConfigs || {}) };
@@ -2387,16 +2488,30 @@ export default function PdfQuestionGeneratorPage() {
                                                     setSectionList(updated);
                                                     saveSectionsForSubject(selectedClass, selectedSubject, updated);
                                                   }}
-                                                  className="w-10 text-center text-xs px-1 py-0.5 border border-indigo-200 rounded bg-white font-bold"
+                                                  onBlur={() => {
+                                                    if (secCfg?.startPage === '' || !secCfg?.startPage || Number(secCfg?.startPage) < 1) {
+                                                      const updated = [...sectionList];
+                                                      const s = { ...updated[idx] };
+                                                      const c = { ...(s.sourceConfigs || {}) };
+                                                      c[src.id] = { ...(c[src.id] || { selected: true }), startPage: 1 };
+                                                      s.sourceConfigs = c;
+                                                      updated[idx] = s;
+                                                      setSectionList(updated);
+                                                      saveSectionsForSubject(selectedClass, selectedSubject, updated);
+                                                    }
+                                                  }}
+                                                  className="w-10 text-center text-xs px-1 py-0.5 border border-indigo-200 rounded bg-white font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none"
                                                 />
                                                 <span className="text-slate-400 text-[10px]">থেকে</span>
                                                 <input
                                                   type="number"
-                                                  min={secCfg?.startPage || 1}
+                                                  min={Number(secCfg?.startPage) || 1}
                                                   max={src.pageCount || 999}
-                                                  value={secCfg?.endPage || src.pageCount || 1}
+                                                  value={secCfg?.endPage !== undefined ? secCfg.endPage : (src.pageCount || 1)}
+                                                  onFocus={(e) => e.target.select()}
                                                   onChange={(e) => {
-                                                    const val = Math.max(secCfg?.startPage || 1, parseInt(e.target.value) || 1);
+                                                    const raw = e.target.value;
+                                                    const val = raw === '' ? '' : parseInt(raw, 10);
                                                     const updated = [...sectionList];
                                                     const s = { ...updated[idx] };
                                                     const c = { ...(s.sourceConfigs || {}) };
@@ -2406,7 +2521,19 @@ export default function PdfQuestionGeneratorPage() {
                                                     setSectionList(updated);
                                                     saveSectionsForSubject(selectedClass, selectedSubject, updated);
                                                   }}
-                                                  className="w-10 text-center text-xs px-1 py-0.5 border border-indigo-200 rounded bg-white font-bold"
+                                                  onBlur={() => {
+                                                    if (secCfg?.endPage === '' || !secCfg?.endPage || Number(secCfg?.endPage) < 1) {
+                                                      const updated = [...sectionList];
+                                                      const s = { ...updated[idx] };
+                                                      const c = { ...(s.sourceConfigs || {}) };
+                                                      c[src.id] = { ...(c[src.id] || { selected: true }), endPage: src.pageCount || 1 };
+                                                      s.sourceConfigs = c;
+                                                      updated[idx] = s;
+                                                      setSectionList(updated);
+                                                      saveSectionsForSubject(selectedClass, selectedSubject, updated);
+                                                    }
+                                                  }}
+                                                  className="w-10 text-center text-xs px-1 py-0.5 border border-indigo-200 rounded bg-white font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none"
                                                 />
                                               </div>
                                             </div>
