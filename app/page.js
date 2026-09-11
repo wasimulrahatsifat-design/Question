@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { exportQuestionPaperDocx, toBengaliNumerals, cleanOptionText, cleanQuestionText, getSectionType, fixBilingualGrammarQuestion, ensureBengaliGrammarAnswer } from '../lib/docxGenerator';
-import { generateQuestionsDirectly } from '../lib/geminiDirect';
+import { exportQuestionPaperDocx, toBengaliNumerals, cleanOptionText, cleanQuestionText, cleanMatchingText, getSectionType, fixBilingualGrammarQuestion, ensureBengaliGrammarAnswer } from '../lib/docxGenerator';
+import { generateQuestionsDirectly, refineSingleAnswerDirectly, regenerateSingleQuestionDirectly } from '../lib/geminiDirect';
 import { 
   DEFAULT_CLASSES,
   DEFAULT_CLASS_SUBJECTS,
@@ -60,7 +60,8 @@ import {
   ChevronDown,
   ChevronUp,
   CheckSquare,
-  Square
+  Square,
+  RefreshCw
 } from 'lucide-react';
 
 const bnLetters = ['ক)', 'খ)', 'গ)', 'ঘ)', 'ঙ)', 'চ)', 'ছ)', 'জ)', 'ঝ)', 'ঞ)', 'ট)', 'ঠ)', 'ড)', 'ঢ)', 'ণ)'];
@@ -69,15 +70,378 @@ const enLetters = ['a)', 'b)', 'c)', 'd)', 'e)', 'f)', 'g)', 'h)', 'i)', 'j)', '
 const enRomanNumerals = ['i)', 'ii)', 'iii)', 'iv)', 'v)', 'vi)', 'vii)', 'viii)', 'ix)', 'x)'];
 const enOptPrefixes = ['a.', 'b.', 'c.', 'd.'];
 
+/**
+ * Global AutoResizeTextarea to prevent unmount and focus loss during live keystrokes
+ */
+export function AutoResizeTextarea({
+  value = '',
+  onChange,
+  className = '',
+  placeholder = '',
+  rows = 1,
+  minHeight = 28,
+  ...props
+}) {
+  const textareaRef = React.useRef(null);
+
+  const adjustHeight = React.useCallback(() => {
+    const node = textareaRef.current;
+    if (node) {
+      node.style.height = 'auto';
+      node.style.height = `${Math.max(node.scrollHeight, minHeight)}px`;
+    }
+  }, [minHeight]);
+
+  React.useEffect(() => {
+    adjustHeight();
+  }, [value, adjustHeight]);
+
+  return (
+    <textarea
+      ref={textareaRef}
+      value={value}
+      rows={rows}
+      onChange={(e) => {
+        adjustHeight();
+        if (onChange) onChange(e);
+      }}
+      className={`${className} resize-none overflow-hidden`}
+      placeholder={placeholder}
+      {...props}
+    />
+  );
+}
+
+/**
+ * Deterministic math solver & formula resolver for automatic client-side answer updates
+ */
+export function solveMathQuestionAutomatically(rawText, subject = '') {
+  if (!rawText || typeof rawText !== 'string') return null;
+  
+  let text = rawText.trim();
+  // Remove question number prefix like ১।, ২), ক., (খ)
+  text = text.replace(/^[০-৯0-9a-zA-Z\(\)ক-ঞ\.\।\-\s]+/, '').trim();
+
+  const bnToEnMap = { '০': '0', '১': '1', '২': '2', '৩': '3', '৪': '4', '৫': '5', '৬': '6', '৭': '7', '৮': '8', '৯': '9' };
+  const enToBnMap = { '0': '০', '1': '১', '2': '২', '3': '৩', '4': '৪', '5': '৫', '6': '৬', '7': '৭', '8': '৮', '9': '৯' };
+  const bnToEn = (str) => String(str).replace(/[০-৯]/g, (d) => bnToEnMap[d] || d);
+  const enToBn = (num) => String(num).replace(/[0-9]/g, (d) => enToBnMap[d] || d);
+
+  // 1. Math definitions & formula shortcuts
+  const knownShortAnswers = [
+    { regex: /গুণ্য\s*[×x\*]\s*গুণক/i, answer: 'গুণফল' },
+    { regex: /ভাজ্য\s*=\s*কী/i, answer: 'ভাজক × ভাগফল + ভাগশেষ' },
+    { regex: /ভাজ্য\s*নির্ণয়ের\s*সূত্র/i, answer: 'ভাজ্য = ভাজক × ভাগফল + ভাগশেষ' },
+    { regex: /ভাগশেষ\s*সর্বদা/i, answer: 'ভাজকের চেয়ে ছোট' },
+    { regex: /যোগের\s*বিপরীত\s*প্রক্রিয়া/i, answer: 'বিয়োগ' },
+    { regex: /গুণের\s*বিপরীত\s*প্রক্রিয়া/i, answer: 'ভাগ' },
+    { regex: /১\s*ডজন\s*=\s*কত/i, answer: '১২টি' },
+    { regex: /১\s*ডজন\s*=/i, answer: '১২টি' },
+    { regex: /১\s*হালি\s*=\s*কত/i, answer: '৪টি' },
+    { regex: /১\s*হালি\s*=/i, answer: '৪টি' },
+    { regex: /১\s*কুড়ি\s*=/i, answer: '২০টি' },
+    { regex: /১\s*কিলোমিটার\s*=\s*কত\s*মিটার/i, answer: '১০০০ মিটার' },
+    { regex: /১\s*কিমি\s*=\s*কত\s*মিটার/i, answer: '১০০০ মিটার' },
+    { regex: /১\s*মিটার\s*=\s*কত\s*সেন্টিমিটার/i, answer: '১০০ সেন্টিমিটার' },
+    { regex: /১\s*মিটার\s*=\s*কত\s*সেমি/i, answer: '১০০ সেমি' },
+    { regex: /১\s*সেন্টিমিটার\s*=\s*কত\s*মিলিমিটার/i, answer: '১০ মিলিমিটার' },
+    { regex: /১\s*কেজি\s*=\s*কত\s*গ্রাম/i, answer: '১০০০ গ্রাম' },
+    { regex: /১\s*কিলোগ্রাম\s*=\s*কত\s*গ্রাম/i, answer: '১০০০ গ্রাম' },
+    { regex: /১\s*দিন\s*=\s*কত\s*ঘণ্টা/i, answer: '২৪ ঘণ্টা' },
+    { regex: /১\s*ঘণ্টা\s*=\s*কত\s*মিনিট/i, answer: '৬০ মিনিট' },
+    { regex: /১\s*মিনিট\s*=\s*কত\s*সেকেন্ড/i, answer: '৬০ সেকেন্ড' },
+    { regex: /১\s*বছর\s*=\s*কত\s*দিন/i, answer: '৩৬৫ দিন' },
+    { regex: /১\s*বছর\s*=\s*কত\s*মাস/i, answer: '১২ মাস' },
+    { regex: /১\s*সপ্তাহ\s*=\s*কত\s*দিন/i, answer: '৭ দিন' },
+    { regex: /১\s*টাকা\s*=\s*কত\s*পয়সা/i, answer: '১০০ পয়সা' },
+    { regex: /১\s*কুইন্টাল\s*=\s*কত\s*কেজি/i, answer: '১০০ কেজি' },
+    { regex: /১\s*মেট্রিক\s*টন\s*=\s*কত\s*কেজি/i, answer: '১০০০ কেজি' },
+    { regex: /সমকোণের\s*পরিমাপ\s*কত|১\s*সমকোণ\s*=\s*কত/i, answer: '৯০°' },
+    { regex: /১\s*সমকোণ\s*=/i, answer: '৯০°' },
+    { regex: /১\s*সরলকোণ\s*=\s*কত|১\s*সরলকোণ\s*=/i, answer: '১৮০°' },
+    { regex: /ত্রিভুজের\s*তিন\s*কোণের\s*সমষ্টি/i, answer: '১৮০°' },
+    { regex: /চতুর্ভুজের\s*চার\s*কোণের\s*সমষ্টি/i, answer: '৩৬০°' },
+    { regex: /বৃত্তের\s*ব্যাস\s*ব্যাসার্ধের\s*কত\s*গুণ/i, answer: '২ গুণ' },
+    { regex: /কোনো\s*সংখ্যাকে\s*০\s*দ্বারা\s*গুণ\s*করলে/i, answer: '০' },
+    { regex: /০\s*কে\s*যেকোনো\s*সংখ্যা\s*দ্বারা\s*ভাগ\s*করলে/i, answer: '০' },
+    { regex: /জোড়\s*সংখ্যা\s*কাকে\s*বলে/i, answer: 'যে সকল সংখ্যা ২ দ্বারা নিঃশেষে বিভাজ্য, তাদের জোড় সংখ্যা বলে।' },
+    { regex: /বিজোড়\s*সংখ্যা\s*কাকে\s*বলে/i, answer: 'যে সকল সংখ্যা ২ দ্বারা নিঃশেষে বিভাজ্য নয়, তাদের বিজোড় সংখ্যা বলে।' },
+    { regex: /প্রকৃত\s*ভগ্নাংশ\s*কাকে\s*বলে/i, answer: 'যে ভগ্নাংশের লব হরের চেয়ে ছোট, তাকে প্রকৃত ভগ্নাংশ বলে।' },
+    { regex: /অপ্রকৃত\s*ভগ্নাংশ\s*কাকে\s*বলে/i, answer: 'যে ভগ্নাংশের লব হরের চেয়ে বড় বা সমান, তাকে অপ্রকৃত ভগ্নাংশ বলে।' },
+    { regex: /মিশ্র\s*ভগ্নাংশ\s*কাকে\s*বলে/i, answer: 'পূর্ণ সংখ্যার সাথে প্রকৃত ভগ্নাংশ যুক্ত থাকলে তাকে মিশ্র ভগ্নাংশ বলে।' },
+    { regex: /মৌলিক\s*সংখ্যা\s*কাকে\s*বলে/i, answer: '১ এর চেয়ে বড় যে সব সংখ্যার ১ এবং ঐ সংখ্যা ছাড়া অন্য কোনো গুণনীয়ক নেই, তাদের মৌলিক সংখ্যা বলে।' },
+    { regex: /যৌগিক\s*সংখ্যা\s*কাকে\s*বলে/i, answer: '১ এর চেয়ে বড় যে সব সংখ্যার ১ এবং ঐ সংখ্যা ছাড়াও অন্য গুণনীয়ক আছে, তাদের যৌগিক সংখ্যা বলে।' },
+    { regex: /ল\.সা\.গু.*পূর্ণরূপ/i, answer: 'লঘিষ্ঠ সাধারণ গুণিতক' },
+    { regex: /গ\.সা\.গু.*পূর্ণরূপ/i, answer: 'গরিষ্ঠ সাধারণ গুণনীয়ক' }
+  ];
+
+  for (const item of knownShortAnswers) {
+    if (item.regex.test(text)) {
+      return item.answer;
+    }
+  }
+
+  // 2. Blank Box Equations (খালি ঘর পূরণ)
+  const boxSymbol = '(?:[🔲⬜□■▢]|(?:\\s*\\[\\s*\\]\\s*)|(?:\\s*\\(\\s*\\)\\s*)|_{2,}|খালিঘর|খালি ঘর)';
+  
+  // Pattern 1: A + [ ] = C
+  let m = text.match(new RegExp(`([০-৯0-9\\.]+)\\s*\\+\\s*${boxSymbol}\\s*=\\s*([০-৯0-9\\.]+)`));
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const c = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(c)) return enToBn(Math.round((c - a) * 1000) / 1000);
+  }
+
+  // Pattern 2: [ ] + A = C
+  m = text.match(new RegExp(`${boxSymbol}\\s*\\+\\s*([০-৯0-9\\.]+)\\s*=\\s*([০-৯0-9\\.]+)`));
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const c = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(c)) return enToBn(Math.round((c - a) * 1000) / 1000);
+  }
+
+  // Pattern 3: A - [ ] = C
+  m = text.match(new RegExp(`([০-৯0-9\\.]+)\\s*[-–−]\\s*${boxSymbol}\\s*=\\s*([০-৯0-9\\.]+)`));
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const c = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(c)) return enToBn(Math.round((a - c) * 1000) / 1000);
+  }
+
+  // Pattern 4: [ ] - A = C
+  m = text.match(new RegExp(`${boxSymbol}\\s*[-–−]\\s*([০-৯0-9\\.]+)\\s*=\\s*([০-৯0-9\\.]+)`));
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const c = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(c)) return enToBn(Math.round((c + a) * 1000) / 1000);
+  }
+
+  // Pattern 5: A × [ ] = C
+  m = text.match(new RegExp(`([০-৯0-9\\.]+)\\s*[×x\*]\\s*${boxSymbol}\\s*=\\s*([০-৯0-9\\.]+)`));
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const c = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(c) && a !== 0) return enToBn(Math.round((c / a) * 1000) / 1000);
+  }
+
+  // Pattern 6: [ ] × A = C
+  m = text.match(new RegExp(`${boxSymbol}\\s*[×x\*]\\s*([০-৯0-9\\.]+)\\s*=\\s*([০-৯0-9\\.]+)`));
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const c = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(c) && a !== 0) return enToBn(Math.round((c / a) * 1000) / 1000);
+  }
+
+  // Pattern 7: A ÷ [ ] = C
+  m = text.match(new RegExp(`([০-৯0-9\\.]+)\\s*[÷/:]\\s*${boxSymbol}\\s*=\\s*([০-৯0-9\\.]+)`));
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const c = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(c) && c !== 0) return enToBn(Math.round((a / c) * 1000) / 1000);
+  }
+
+  // Pattern 8: [ ] ÷ A = C
+  m = text.match(new RegExp(`${boxSymbol}\\s*[÷/:]\\s*([০-৯0-9\\.]+)\\s*=\\s*([০-৯0-9\\.]+)`));
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const c = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(c)) return enToBn(Math.round((c * a) * 1000) / 1000);
+  }
+
+  // 3. Direct Arithmetic Calculations: A + B, A - B, A × B, A ÷ B
+  // Addition: A + B
+  m = text.match(/^([০-৯0-9\.]+)\s*\+\s*([০-৯0-9\.]+)(?:\s*=\s*(?:কত|\?|$))?/);
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const b = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(b)) return enToBn(Math.round((a + b) * 1000) / 1000);
+  }
+
+  // Subtraction: A - B
+  m = text.match(/^([০-৯0-9\.]+)\s*[-–−]\s*([০-৯0-9\.]+)(?:\s*=\s*(?:কত|\?|$))?/);
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const b = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(b)) return enToBn(Math.round((a - b) * 1000) / 1000);
+  }
+
+  // Multiplication: A × B
+  m = text.match(/^([০-৯0-9\.]+)\s*[×x\*]\s*([০-৯0-9\.]+)(?:\s*=\s*(?:কত|\?|$))?/);
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const b = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(b)) return enToBn(Math.round((a * b) * 1000) / 1000);
+  }
+
+  // Division: A ÷ B
+  m = text.match(/^([০-৯0-9\.]+)\s*[÷/:]\s*([০-৯0-9\.]+)(?:\s*=\s*(?:কত|\?|$))?/);
+  if (m) {
+    const a = parseFloat(bnToEn(m[1]));
+    const b = parseFloat(bnToEn(m[2]));
+    if (!isNaN(a) && !isNaN(b) && b !== 0) {
+      if (Number.isInteger(a) && Number.isInteger(b)) {
+        const div = Math.floor(a / b);
+        const rem = a % b;
+        if (rem === 0) return enToBn(div);
+        return `${enToBn(div)} (ভাগশেষ ${enToBn(rem)})`;
+      }
+      return enToBn(Math.round((a / b) * 1000) / 1000);
+    }
+  }
+
+  // Multiplication table: যেমন ৭ এর ঘরের নামতা
+  m = text.match(/([০-৯0-9]+)\s*(?:এর\s*ঘরের\s*)?নামতা/i);
+  if (m) {
+    const n = parseInt(bnToEn(m[1]), 10);
+    if (!isNaN(n) && n > 0 && n <= 30) {
+      const rows = [];
+      for (let i = 1; i <= 10; i++) {
+        rows.push(`${enToBn(n)} × ${enToBn(i)} = ${enToBn(n * i)}`);
+      }
+      return rows.join('\n');
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Standardize and clean generated question output data
+ */
+export function formatGeneratedResultData(resultData, selectedSubject) {
+  if (!resultData || !Array.isArray(resultData.sections)) return resultData;
+  resultData.sections.forEach((sec, sIdx) => {
+    const isMath = selectedSubject?.includes('গণিত') || selectedSubject?.toLowerCase().includes('math');
+    const isMathDecimal = isMath && (sec.id === 'math_decimal_mul_div' || sec.title?.includes('দশমিক'));
+
+    const fallbackDecimalProblems = [
+      { questionText: '০.৩ × ২', answer: '০.৬' },
+      { questionText: '০.৫ × ৪', answer: '২' },
+      { questionText: '৩.৭৬ × ১০', answer: '৩৭.৬' },
+      { questionText: '০.৮ ÷ ২', answer: '০.৪' },
+      { questionText: '৪.২ ÷ ৬', answer: '০.৭' },
+      { questionText: '১০.৫ ÷ ৫', answer: '২.১' },
+    ];
+
+    const isEnglish = Boolean(selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english')));
+    const isEnglish2nd = isEnglish && (selectedSubject?.includes('২য়') || selectedSubject?.includes('2nd') || selectedSubject?.includes('grammar') || selectedSubject?.includes('ব্যাকরণ'));
+    const isEnglish2ndSec = isEnglish && (isEnglish2nd || sec.id?.startsWith('en2_') || sec.id?.includes('grammar') || sec.id?.includes('def')) && (sec.id?.includes('def') || sec.title?.includes('সংজ্ঞা') || sec.title?.includes('কাকে বলে') || sec.title?.includes('ব্যাকরণ')) && !sec.id?.includes('en_questions') && !sec.id?.includes('en_punctuation') && !sec.id?.includes('en_word_meaning');
+
+    (sec.questions || []).forEach((q, qIdx) => {
+      q.questionText = cleanQuestionText(q.questionText);
+      if (isEnglish2ndSec) {
+        q.questionText = fixBilingualGrammarQuestion(q.questionText);
+        q.answer = ensureBengaliGrammarAnswer(q.questionText, q.answer);
+      }
+      if (isEnglish && q.answer) {
+        q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\]\)]\s*/gi, '').trim();
+      }
+      const isBangla2nd = selectedSubject && (selectedSubject.includes('বাংলা ২য়') || selectedSubject.includes('বাংলা ২') || selectedSubject.toLowerCase().includes('bangla 2nd') || selectedSubject.includes('ব্যাকরণ'));
+      if (isBangla2nd && q.answer) {
+        q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\)\]]\s*/gi, '').trim();
+      }
+      const isComp = selectedSubject && (selectedSubject.includes('কম্পিউটার') || selectedSubject.toLowerCase().includes('computer') || selectedSubject.toLowerCase().includes('ict') || selectedSubject.includes('আইসিটি'));
+      if (isComp && q.answer) {
+        q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\)\]]\s*/gi, '').trim();
+      }
+      const isGk = selectedSubject && (selectedSubject.includes('সাধারণ জ্ঞান') || selectedSubject.toLowerCase().includes('general knowledge') || selectedSubject.toLowerCase().includes('gk') || selectedSubject.includes('জিকে'));
+      if (isGk && q.answer) {
+        q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\)\]]\s*/gi, '').trim();
+      }
+      const isMathWordProb = isMath && (sec.id?.startsWith('math_word_prob') || sec.id?.startsWith('math_problem') || sec.title?.includes('গাণিতিক সমস্যা')) && !sec.id?.includes('math_mul_div') && !sec.id?.includes('math_add_sub') && !sec.id?.includes('math_table') && !sec.id?.includes('math_multiplication_table') && !sec.id?.includes('math_short') && !sec.id?.includes('math_blank_box') && !sec.id?.includes('math_geom');
+      if (isMath && !isMathWordProb && q.answer) {
+        q.answer = String(q.answer).replace(/[\(\[]\s*পৃষ্ঠা[^\]\)]*[\)\]]\s*/gi, '').trim();
+      }
+      const isMatchSection = sec.id === 'en_match' || sec.id === 'bn_match' || sec.id?.includes('match') || sec.title?.toLowerCase().includes('match') || sec.title?.includes('মিল');
+      if (isMatchSection) {
+        q.questionText = cleanMatchingText(q.questionText);
+        q.answer = cleanMatchingText(q.answer);
+      }
+
+      const isBlankBoxSec = isMath && (sec.id === 'math_blank_box' || sec.title?.includes('খালি ঘর'));
+      if (isBlankBoxSec) {
+        // Class 3 Math Section 3: Strictly Addition & Subtraction only!
+        const hasMulOrDiv = q.questionText && (q.questionText.includes('×') || q.questionText.includes('*') || q.questionText.includes('÷') || q.questionText.includes('/'));
+        if (hasMulOrDiv) {
+          const fallbackAdditionSubtractions = [
+            { questionText: '১৪ + 🔲 = ৩৭', answer: '২৩' },
+            { questionText: '🔲 - ২৫ = ৪০', answer: '৬৫' },
+            { questionText: '🔲 + ২৮ = ৭৫', answer: '৪৭' },
+            { questionText: '৮৫ - 🔲 = ৩২', answer: '৫৩' },
+            { questionText: '৫৭ + 🔲 = ৯০', answer: '৩৩' },
+            { questionText: '৬৪ - 🔲 = ১৮', answer: '৪৬' },
+            { questionText: '🔲 + ৩৩ = ৮২', answer: '৪৯' },
+          ];
+          const fb = fallbackAdditionSubtractions[qIdx % fallbackAdditionSubtractions.length];
+          q.questionText = fb.questionText;
+          q.answer = fb.answer;
+        }
+      }
+
+      const isDivideOnlySec = isMath && (sec.mathMode === 'divide' || (sec.title?.includes('ভাগ') && !sec.title?.includes('গুণ')));
+      if (isDivideOnlySec && !isBlankBoxSec) {
+        const hasMul = q.questionText && (q.questionText.includes('×') || q.questionText.includes('*'));
+        if (hasMul) {
+          const fallbackDivisions = [
+            { questionText: '৭২ ÷ ৮', answer: '৯' },
+            { questionText: '৫৬ ÷ ৭', answer: '৮' },
+            { questionText: '৪৮ ÷ ৬', answer: '৮' },
+            { questionText: '৬৩ ÷ ৯', answer: '৭' },
+            { questionText: '৪৫ ÷ ৫', answer: '৯' },
+            { questionText: '৩৬ ÷ ৪', answer: '৯' },
+          ];
+          const fb = fallbackDivisions[qIdx % fallbackDivisions.length];
+          q.questionText = fb.questionText;
+          q.answer = fb.answer;
+        }
+      }
+
+      const isMultiplyOnlySec = isMath && (sec.mathMode === 'multiply' || (sec.title?.includes('গুণ') && !sec.title?.includes('ভাগ')));
+      if (isMultiplyOnlySec && !isBlankBoxSec) {
+        const hasDiv = q.questionText && (q.questionText.includes('÷') || q.questionText.includes('/'));
+        if (hasDiv) {
+          const fallbackMultiplications = [
+            { questionText: '৮ × ৭', answer: '৫৬' },
+            { questionText: '৯ × ৬', answer: '৫৪' },
+            { questionText: '১২ × ৫', answer: '৬০' },
+            { questionText: '১৫ × ৪', answer: '৬০' },
+            { questionText: '৭ × ৯', answer: '৬৩' },
+          ];
+          const fb = fallbackMultiplications[qIdx % fallbackMultiplications.length];
+          q.questionText = fb.questionText;
+          q.answer = fb.answer;
+        }
+      }
+
+      if (isMathDecimal) {
+        const hasDec = q.questionText && (q.questionText.includes('.') || q.questionText.includes('·') || q.questionText.includes('দশমিক'));
+        if (!hasDec) {
+          const fb = fallbackDecimalProblems[qIdx % fallbackDecimalProblems.length];
+          q.questionText = fb.questionText;
+          q.answer = fb.answer;
+        }
+      }
+      if (q.options && Array.isArray(q.options)) {
+        q.options = q.options.slice(0, 2).map((opt) => cleanOptionText(opt));
+      }
+    });
+  });
+  return resultData;
+}
+
 const cleanPoemDisplay = (text) => {
   if (!text) return '“কবিতার নাম” কবিতা লিখ কবির নামসহ ১ম ৮ লাইন।';
-  return String(text).trim().replace(/^\d+[\।\.\-\s]+/, '').replace(/^[\u09E6-\u09EF]+[\।\.\-\s]+/, '');
+  let t = String(text).trim().replace(/^\d+[\।\.\-\s]+/, '').replace(/^[\u09E6-\u09EF]+[\।\.\-\s]+/, '');
+  return t;
 };
 
 const cleanCompositionDisplay = (text) => {
-  if (!text) return 'Write a composition about “The Sundarbans”';
+  if (!text) return 'Write a composition about given topic';
   let t = String(text).trim().replace(/^\d+[\.\।\-\s]+/, '');
-  if (t.toLowerCase().startsWith('write a composition about')) {
+  if (t.toLowerCase().includes('rhyme') || t.toLowerCase().includes('poem') || t.includes('কবিতা') || t.includes('ছড়া')) {
+    return t;
+  }
+  if (t.toLowerCase().startsWith('write a composition') || t.toLowerCase().startsWith('write a paragraph')) {
     return t;
   }
   const match = t.match(/[“"']([^“"']+)["'”]/);
@@ -131,8 +495,9 @@ export default function PdfQuestionGeneratorPage() {
   // Toggle between Question Paper Preview and Answer Key Preview
   const [previewMode, setPreviewMode] = useState('question'); // 'question' | 'answer'
   
-  // AI Refinement State
+  // AI Refinement & Single Question Regeneration State
   const [refiningKey, setRefiningKey] = useState(null); // e.g. '0_1'
+  const [regeneratingQKey, setRegeneratingQKey] = useState(null); // e.g. '0_1'
   const [customPromptOpenKey, setCustomPromptOpenKey] = useState(null);
   const [customPromptText, setCustomPromptText] = useState('');
   
@@ -140,6 +505,7 @@ export default function PdfQuestionGeneratorPage() {
   const [availableSources, setAvailableSources] = useState([]);
   const [selectedSourceConfigs, setSelectedSourceConfigs] = useState({}); // { [id]: { selected: boolean, startPage: number, endPage: number } }
   const [isLoadingSources, setIsLoadingSources] = useState(false);
+  const [cachedSourcesBundle, setCachedSourcesBundle] = useState(null);
   
   // Section Configuration for Current Class & Subject
   const [sectionList, setSectionList] = useState(() => loadSectionsForSubject('পঞ্চম', 'বিজ্ঞান'));
@@ -471,6 +837,14 @@ export default function PdfQuestionGeneratorPage() {
         } else {
           titles.push(`${src.title} (${cfg.selectedChapterIds.length}টি অধ্যায়)`);
         }
+      } else if (
+        src.type === 'image' &&
+        Array.isArray(src.images) &&
+        src.images.length > 1 &&
+        Array.isArray(cfg?.selectedImageIds) &&
+        cfg.selectedImageIds.length > 0
+      ) {
+        titles.push(`${src.title} (${cfg.selectedImageIds.length}টি ছবি)`);
       } else {
         titles.push(src.title);
       }
@@ -505,10 +879,12 @@ export default function PdfQuestionGeneratorPage() {
       };
     } else {
       const hasChaps = src && Array.isArray(src.chapters) && src.chapters.length > 0;
+      const isMultiImg = src && src.type === 'image' && Array.isArray(src.images) && src.images.length > 1;
       configs[sourceId] = {
         selected: true,
-        mode: hasChaps ? 'chapters' : 'pages',
+        mode: hasChaps ? 'chapters' : (isMultiImg ? 'images' : 'pages'),
         selectedChapterIds: hasChaps ? src.chapters.map((c) => c.id) : [],
+        selectedImageIds: isMultiImg ? src.images.map((img) => img.id) : [],
         startPage: 1,
         endPage: src?.pageCount || 1,
       };
@@ -570,6 +946,67 @@ export default function PdfQuestionGeneratorPage() {
         ...currentCfg,
         mode: 'chapters',
         selectedChapterIds: [],
+      };
+    }
+
+    sec.sourceConfigs = configs;
+    sec.sourceId = null;
+    sec.sourceTitle = null;
+    updated[secIdx] = sec;
+    setSectionList(updated);
+    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+  };
+
+  const handleToggleSecImage = (secIdx, sourceId, imageId) => {
+    const updated = [...sectionList];
+    const sec = { ...updated[secIdx] };
+    const configs = { ...(sec.sourceConfigs || {}) };
+    const src = availableSources.find((s) => s.id === sourceId);
+    const defaultImgIds = src && Array.isArray(src.images) ? src.images.map((img) => img.id) : [];
+    const currentCfg = configs[sourceId] || { selected: true, mode: 'images', selectedImageIds: defaultImgIds };
+    const currentImageIds = Array.isArray(currentCfg.selectedImageIds) ? currentCfg.selectedImageIds : defaultImgIds;
+
+    let newImageIds;
+    if (currentImageIds.includes(imageId)) {
+      newImageIds = currentImageIds.filter((id) => id !== imageId);
+    } else {
+      newImageIds = [...currentImageIds, imageId];
+    }
+
+    configs[sourceId] = {
+      ...currentCfg,
+      selected: newImageIds.length > 0,
+      mode: 'images',
+      selectedImageIds: newImageIds,
+    };
+
+    sec.sourceConfigs = configs;
+    sec.sourceId = null;
+    sec.sourceTitle = null;
+    updated[secIdx] = sec;
+    setSectionList(updated);
+    saveSectionsForSubject(selectedClass, selectedSubject, updated);
+  };
+
+  const handleSelectAllSecImages = (secIdx, sourceId, selectAll = true) => {
+    const updated = [...sectionList];
+    const sec = { ...updated[secIdx] };
+    const configs = { ...(sec.sourceConfigs || {}) };
+    const src = availableSources.find((s) => s.id === sourceId);
+    const currentCfg = configs[sourceId] || { selected: true, mode: 'images', selectedImageIds: [] };
+
+    if (selectAll && src && Array.isArray(src.images)) {
+      configs[sourceId] = {
+        ...currentCfg,
+        selected: true,
+        mode: 'images',
+        selectedImageIds: src.images.map((img) => img.id),
+      };
+    } else {
+      configs[sourceId] = {
+        ...currentCfg,
+        mode: 'images',
+        selectedImageIds: [],
       };
     }
 
@@ -831,6 +1268,18 @@ export default function PdfQuestionGeneratorPage() {
               endPage: Number(cfg.endPage) || src.pageCount || 1,
             });
           }
+        } else if (
+          src.type === 'image' &&
+          Array.isArray(src.images) &&
+          src.images.length > 1
+        ) {
+          const selectedImageIds = Array.isArray(cfg.selectedImageIds) && cfg.selectedImageIds.length > 0
+            ? cfg.selectedImageIds
+            : src.images.map((img) => img.id);
+          selectedItems.push({
+            source: src,
+            selectedImageIds,
+          });
         } else {
           selectedItems.push({
             source: src,
@@ -886,6 +1335,37 @@ export default function PdfQuestionGeneratorPage() {
               }
               return;
             }
+          }
+
+          // If Image Folder and images were selected
+          if (
+            foundSrc.type === 'image' &&
+            Array.isArray(foundSrc.images) &&
+            foundSrc.images.length > 1 &&
+            Array.isArray(cfg.selectedImageIds) &&
+            cfg.selectedImageIds.length > 0
+          ) {
+            const imgCount = cfg.selectedImageIds.length;
+            titleParts.push(`${foundSrc.title} (${imgCount}টি ছবি)`);
+
+            const existingItem = selectedItems.find((item) => item.source.id === foundSrc.id);
+            if (existingItem) {
+              if (!Array.isArray(existingItem.selectedImageIds)) {
+                existingItem.selectedImageIds = [...cfg.selectedImageIds];
+              } else {
+                cfg.selectedImageIds.forEach((id) => {
+                  if (!existingItem.selectedImageIds.includes(id)) {
+                    existingItem.selectedImageIds.push(id);
+                  }
+                });
+              }
+            } else {
+              selectedItems.push({
+                source: foundSrc,
+                selectedImageIds: [...cfg.selectedImageIds],
+              });
+            }
+            return;
           }
 
           // Fallback or non-chapter / custom page range / image / text source
@@ -968,6 +1448,10 @@ export default function PdfQuestionGeneratorPage() {
               return;
             }
           }
+          if (src.type === 'image' && Array.isArray(src.images) && src.images.length > 1 && Array.isArray(cfg.selectedImageIds) && cfg.selectedImageIds.length > 0) {
+            mainSourceTitles.push(`${src.title} (${cfg.selectedImageIds.length}টি ছবি)`);
+            return;
+          }
           const pageRangeStr = (cfg.startPage && cfg.endPage) ? ` (পৃষ্ঠা ${cfg.startPage}-${cfg.endPage})` : '';
           mainSourceTitles.push(`${src.title}${pageRangeStr}`);
         }
@@ -997,67 +1481,19 @@ export default function PdfQuestionGeneratorPage() {
         onStatusChange: (msg) => setStatusMessage(msg),
       });
 
-      // Clean prefix duplicates and format outputs
-      if (resultData && resultData.sections) {
-        resultData.sections.forEach((sec, sIdx) => {
-          const isMath = selectedSubject?.includes('গণিত') || selectedSubject?.toLowerCase().includes('math');
-          const isMathShort = isMath && (sec.id === 'math_short' || sIdx === 0);
-          const isMathDecimal = isMath && (sec.id === 'math_decimal_mul_div' || sec.title?.includes('দশমিক'));
+      // Cache extracted sources for ultra-fast question regeneration
+      setCachedSourcesBundle({
+        images,
+        textSources,
+        className: selectedClass,
+        subject: selectedSubject,
+        requestedSections: activeSections,
+        mainSourceTitle: mainSourceTitleStr,
+        currentOffset,
+      });
 
-          const fallbackDecimalProblems = [
-            { questionText: '০.৩ × ২', answer: '০.৬' },
-            { questionText: '০.৫ × ৪', answer: '২' },
-            { questionText: '৩.৭৬ × ১০', answer: '৩৭.৬' },
-            { questionText: '০.৮ ÷ ২', answer: '০.৪' },
-            { questionText: '৪.২ ÷ ৬', answer: '০.৭' },
-            { questionText: '১০.৫ ÷ ৫', answer: '২.১' },
-          ];
-
-                    const isEnglish = Boolean(selectedSubject && (selectedSubject.includes('ইংরেজি') || selectedSubject.toLowerCase().includes('english')));
-          const isEnglish2nd = isEnglish && (selectedSubject?.includes('২য়') || selectedSubject?.includes('2nd') || selectedSubject?.includes('grammar') || selectedSubject?.includes('ব্যাকরণ'));
-          const isEnglish2ndSec = isEnglish && (isEnglish2nd || sec.id?.startsWith('en2_') || sec.id?.includes('grammar') || sec.id?.includes('def')) && (sec.id?.includes('def') || sec.title?.includes('সংজ্ঞা') || sec.title?.includes('কাকে বলে') || sec.title?.includes('ব্যাকরণ')) && !sec.id?.includes('en_questions') && !sec.id?.includes('en_punctuation') && !sec.id?.includes('en_word_meaning');
-
-          (sec.questions || []).forEach((q, qIdx) => {
-            q.questionText = cleanQuestionText(q.questionText);
-            if (isEnglish2ndSec) {
-              q.questionText = fixBilingualGrammarQuestion(q.questionText);
-              q.answer = ensureBengaliGrammarAnswer(q.questionText, q.answer);
-            }
-                        if (isEnglish && q.answer) {
-              q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\]\)]\s*/gi, '').trim();
-            }
-            const isBangla2nd = selectedSubject && (selectedSubject.includes('বাংলা ২য়') || selectedSubject.includes('বাংলা ২') || selectedSubject.toLowerCase().includes('bangla 2nd') || selectedSubject.includes('ব্যাকরণ'));
-            if (isBangla2nd && q.answer) {
-              q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\)\]]\s*/gi, '').trim();
-            }
-            const isComp = selectedSubject && (selectedSubject.includes('কম্পিউটার') || selectedSubject.toLowerCase().includes('computer') || selectedSubject.toLowerCase().includes('ict') || selectedSubject.includes('আইসিটি'));
-            if (isComp && q.answer) {
-              q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\)\]]\s*/gi, '').trim();
-            }
-            const isGk = selectedSubject && (selectedSubject.includes('সাধারণ জ্ঞান') || selectedSubject.toLowerCase().includes('general knowledge') || selectedSubject.toLowerCase().includes('gk') || selectedSubject.includes('জিকে'));
-            if (isGk && q.answer) {
-              q.answer = String(q.answer).replace(/[\(\[]\s*(?:পিডিএফ\s*|pdf\s*|সোর্স\s*|source\s*)?(?:পৃষ্ঠা|page|p\.)[^\]\)]*[\)\]]\s*/gi, '').trim();
-            }
-            const isMathWordProb = isMath && (sec.id?.startsWith('math_word_prob') || sec.id?.startsWith('math_problem') || sec.title?.includes('গাণিতিক সমস্যা')) && !sec.id?.includes('math_mul_div') && !sec.id?.includes('math_add_sub') && !sec.id?.includes('math_table') && !sec.id?.includes('math_multiplication_table') && !sec.id?.includes('math_short') && !sec.id?.includes('math_blank_box') && !sec.id?.includes('math_geom');
-            if (isMath && !isMathWordProb && q.answer) {
-              q.answer = String(q.answer).replace(/[\(\[]\s*পৃষ্ঠা[^\]\)]*[\)\]]\s*/gi, '').trim();
-            }
-            if (isMathDecimal) {
-              const hasDec = q.questionText && (q.questionText.includes('.') || q.questionText.includes('·') || q.questionText.includes('দশমিক'));
-              if (!hasDec) {
-                const fb = fallbackDecimalProblems[qIdx % fallbackDecimalProblems.length];
-                q.questionText = fb.questionText;
-                q.answer = fb.answer;
-              }
-            }
-            if (q.options && Array.isArray(q.options)) {
-              q.options = q.options.slice(0, 2).map((opt) => cleanOptionText(opt));
-            }
-          });
-        });
-      }
-
-      setGeneratedData(resultData);
+      const formatted = formatGeneratedResultData(resultData, selectedSubject);
+      setGeneratedData(formatted);
       setStatusMessage('');
       setErrorMessage('');
     } catch (err) {
@@ -1073,6 +1509,74 @@ export default function PdfQuestionGeneratorPage() {
       setErrorMessage(errorText);
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  // Fast Question Regeneration with existing extracted sources and avoid list
+  const handleRegenerateQuestions = async () => {
+    if (isProcessing) return;
+
+    // Collect all existing question texts to exclude
+    const avoidQuestions = [];
+    if (generatedData && Array.isArray(generatedData.sections)) {
+      generatedData.sections.forEach((sec) => {
+        (sec.questions || []).forEach((q) => {
+          if (q.questionText && typeof q.questionText === 'string') {
+            const t = q.questionText.trim();
+            if (t.length > 1 && !avoidQuestions.includes(t)) {
+              avoidQuestions.push(t);
+            }
+          }
+        });
+      });
+    }
+
+    const effectiveApiKey = (userApiKey && userApiKey.trim()) || 
+      (typeof window !== 'undefined' ? (localStorage.getItem('gemini_api_key') || '') : '') || 
+      process.env.NEXT_PUBLIC_GEMINI_API_KEY || 
+      '';
+
+    // If cached sources are available, regenerate immediately without re-extracting PDFs/images
+    if (
+      cachedSourcesBundle &&
+      cachedSourcesBundle.className === selectedClass &&
+      cachedSourcesBundle.subject === selectedSubject &&
+      ((cachedSourcesBundle.images && cachedSourcesBundle.images.length > 0) ||
+       (cachedSourcesBundle.textSources && cachedSourcesBundle.textSources.length > 0))
+    ) {
+      try {
+        setIsProcessing(true);
+        setErrorMessage('');
+        setStatusMessage('বিদ্যমান সোর্স থেকে নতুন বৈচিত্র্যময় প্রশ্ন তৈরি করা হচ্ছে...');
+
+        const resultData = await generateQuestionsDirectly({
+          images: cachedSourcesBundle.images,
+          textSources: cachedSourcesBundle.textSources,
+          className: selectedClass,
+          subject: selectedSubject,
+          requestedSections: cachedSourcesBundle.requestedSections || sectionList.filter((s) => s.enabled),
+          mainSourceTitle: cachedSourcesBundle.mainSourceTitle,
+          customInstructions: '',
+          apiKey: effectiveApiKey,
+          pageOffset: cachedSourcesBundle.currentOffset || loadPageOffset(selectedClass, selectedSubject),
+          avoidQuestions: avoidQuestions,
+          onStatusChange: (msg) => setStatusMessage(msg),
+        });
+
+        const formatted = formatGeneratedResultData(resultData, selectedSubject);
+        setGeneratedData(formatted);
+        setStatusMessage('');
+        setErrorMessage('');
+      } catch (err) {
+        console.error('Regeneration Error:', err);
+        let errorText = err?.message || 'প্রশ্নপত্র পুনর্নির্মাণ করতে সমস্যা হয়েছে।';
+        setErrorMessage(errorText);
+      } finally {
+        setIsProcessing(false);
+      }
+    } else {
+      // Fallback to regular generation flow
+      handleGenerateQuestions();
     }
   };
 
@@ -1106,19 +1610,81 @@ export default function PdfQuestionGeneratorPage() {
     });
   };
 
-  const cleanPoemDisplay = (text) => {
-    if (!text) return '';
-    return text.replace(/^[০-৯0-9]+[\।\.\-\)\s]+/, '').trim();
-  };
-
   const handleQuestionTextChange = (sectionIndex, qIndex, newText) => {
     setGeneratedData((prev) => {
+      if (!prev || !prev.sections) return prev;
       const updated = JSON.parse(JSON.stringify(prev));
       if (updated.sections[sectionIndex]?.questions?.[qIndex]) {
         updated.sections[sectionIndex].questions[qIndex].questionText = newText;
+        
+        // Auto-solve deterministic math, blank box, units, or definitions
+        const autoAns = solveMathQuestionAutomatically(newText, selectedSubject);
+        if (autoAns) {
+          updated.sections[sectionIndex].questions[qIndex].answer = autoAns;
+        }
       }
       return updated;
     });
+  };
+
+  // Auto-solve question answer via client math solver or AI for complex questions
+  const handleAutoSolveQuestion = async (sectionIndex, qIndex, text) => {
+    const targetText = text !== undefined ? text : (generatedData?.sections?.[sectionIndex]?.questions?.[qIndex]?.questionText || '');
+    if (!targetText || targetText.trim().length < 2) return;
+
+    // 1. First attempt deterministic instant solver
+    const autoAns = solveMathQuestionAutomatically(targetText, selectedSubject);
+    if (autoAns) {
+      handleAnswerTextChange(sectionIndex, qIndex, autoAns);
+      return;
+    }
+
+    // 2. Fallback to AI answer solver
+    const itemKey = `${sectionIndex}_${qIndex}`;
+    try {
+      setRefiningKey(itemKey);
+      const effectiveApiKey = (userApiKey && userApiKey.trim()) || 
+        (typeof window !== 'undefined' ? (localStorage.getItem('gemini_api_key') || '') : '') || 
+        process.env.NEXT_PUBLIC_GEMINI_API_KEY || 
+        '';
+
+      let solved = '';
+      try {
+        solved = await refineSingleAnswerDirectly({
+          questionText: targetText,
+          currentAnswer: generatedData?.sections?.[sectionIndex]?.questions?.[qIndex]?.answer || '',
+          action: 'solve_question',
+          className: selectedClass,
+          subject: selectedSubject,
+          apiKey: effectiveApiKey,
+        });
+      } catch (directErr) {
+        const res = await fetch('/api/refine-answer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            questionText: targetText,
+            currentAnswer: generatedData?.sections?.[sectionIndex]?.questions?.[qIndex]?.answer || '',
+            action: 'solve_question',
+            className: selectedClass,
+            subject: selectedSubject,
+            apiKey: effectiveApiKey,
+          }),
+        });
+        if (res.ok) {
+          const d = await res.json();
+          solved = d?.refinedAnswer;
+        }
+      }
+
+      if (solved && solved.trim()) {
+        handleAnswerTextChange(sectionIndex, qIndex, solved.trim());
+      }
+    } catch (err) {
+      console.warn('Auto solve question error:', err);
+    } finally {
+      setRefiningKey(null);
+    }
   };
 
   const handleAnswerTextChange = (sectionIndex, qIndex, newAnswer) => {
@@ -1204,44 +1770,103 @@ export default function PdfQuestionGeneratorPage() {
     }
   };
 
-  function AutoResizeTextarea({
-    value = '',
-    onChange,
-    className = '',
-    placeholder = '',
-    rows = 1,
-    minHeight = 28,
-    ...props
-  }) {
-    const textareaRef = React.useRef(null);
-  
-    const adjustHeight = React.useCallback(() => {
-      const node = textareaRef.current;
-      if (node) {
-        node.style.height = 'auto';
-        node.style.height = `${Math.max(node.scrollHeight, minHeight)}px`;
+  // Live Single Question Regeneration Handler
+  const handleRegenerateSingleQuestion = async (sectionIndex, qIndex) => {
+    const section = generatedData?.sections?.[sectionIndex];
+    const question = section?.questions?.[qIndex];
+    if (!section || !question) return;
+
+    const key = `${sectionIndex}_${qIndex}`;
+    setRegeneratingQKey(key);
+
+    try {
+      const effectiveApiKey = (userApiKey && userApiKey.trim()) || 
+        (typeof window !== 'undefined' ? (localStorage.getItem('gemini_api_key') || '') : '') || 
+        process.env.NEXT_PUBLIC_GEMINI_API_KEY || 
+        '';
+
+      // Gather avoid questions from the existing paper
+      const avoidQuestions = [];
+      if (generatedData?.sections) {
+        generatedData.sections.forEach((sec) => {
+          (sec.questions || []).forEach((q) => {
+            if (q?.questionText) avoidQuestions.push(q.questionText.trim());
+          });
+        });
       }
-    }, [minHeight]);
-  
-    React.useEffect(() => {
-      adjustHeight();
-    }, [value, adjustHeight]);
-  
-    return (
-      <textarea
-        ref={textareaRef}
-        value={value}
-        rows={rows}
-        onChange={(e) => {
-          adjustHeight();
-          if (onChange) onChange(e);
-        }}
-        className={`${className} resize-none overflow-hidden`}
-        placeholder={placeholder}
-        {...props}
-      />
-    );
-  }
+
+      // Use cached bundle sources or process on the fly
+      let images = cachedSourcesBundle?.images || [];
+      let textSources = cachedSourcesBundle?.textSources || [];
+
+      if ((!images || images.length === 0) && (!textSources || textSources.length === 0)) {
+        const selectedItems = [];
+        availableSources.forEach((src) => {
+          const cfg = selectedSourceConfigs[src.id];
+          if (cfg && cfg.selected) {
+            if (src.type === 'pdf' && Array.isArray(src.chapters) && (cfg.selectedChapterIds || []).length > 0) {
+              const chaps = src.chapters.filter((c) => cfg.selectedChapterIds.includes(c.id));
+              if (chaps.length > 0) {
+                selectedItems.push({ source: src, selectedChapters: chaps });
+                return;
+              }
+            }
+            if (src.type === 'image' && Array.isArray(src.images) && src.images.length > 1) {
+              const selectedImageIds = Array.isArray(cfg.selectedImageIds) && cfg.selectedImageIds.length > 0
+                ? cfg.selectedImageIds
+                : src.images.map((img) => img.id);
+              selectedItems.push({ source: src, selectedImageIds });
+              return;
+            }
+            selectedItems.push({
+              source: src,
+              startPage: cfg.startPage || 1,
+              endPage: cfg.endPage || src.pageCount || 1,
+            });
+          }
+        });
+
+        if (selectedItems.length > 0) {
+          const processed = await processSelectedSources(selectedItems);
+          images = processed.images || [];
+          textSources = processed.textSources || [];
+        }
+      }
+
+      const res = await regenerateSingleQuestionDirectly({
+        images,
+        textSources,
+        className: selectedClass,
+        subject: selectedSubject,
+        sectionTitle: section.title,
+        sectionId: section.id,
+        currentQuestionText: question.questionText,
+        avoidQuestions,
+        apiKey: effectiveApiKey,
+        mathMode: section.mathMode || 'mix',
+      });
+
+      if (res && res.questionText) {
+        setGeneratedData((prev) => {
+          const updated = JSON.parse(JSON.stringify(prev));
+          if (updated.sections[sectionIndex]?.questions?.[qIndex]) {
+            updated.sections[sectionIndex].questions[qIndex].questionText = res.questionText;
+            if (res.answer) {
+              const currentOffset = loadPageOffset(selectedClass, selectedSubject);
+              updated.sections[sectionIndex].questions[qIndex].answer = applyPageOffsetToAnswer(res.answer, currentOffset);
+            }
+          }
+          return updated;
+        });
+      }
+    } catch (err) {
+      console.error('Single Question Regeneration Error:', err);
+      const msg = err instanceof Error && err.message ? err.message : 'প্রশ্নটি নতুন করে তৈরি করতে সমস্যা হয়েছে।';
+      alert(msg);
+    } finally {
+      setRegeneratingQKey(null);
+    }
+  };
 
   // Export to DOCX with Selected Orientation & Columns
   const handleExport = (includeAnswers = false) => {
@@ -1295,17 +1920,30 @@ export default function PdfQuestionGeneratorPage() {
                   <AutoResizeTextarea
                     value={cleanQuestionText(q.questionText)}
                     onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                    onBlur={(e) => handleAutoSolveQuestion(sIndex, qIndex, e.target.value)}
                     rows={1}
                     className="w-full text-sm p-1.5 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 font-medium text-slate-900 bg-white"
                     placeholder="সাধারণ জ্ঞান প্রশ্ন..."
                   />
-                  <button
-                    onClick={() => handleDeleteQuestion(sIndex, qIndex)}
-                    className="text-slate-300 hover:text-red-500 p-1 flex-shrink-0"
-                    title="মুছুন"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex items-center space-x-1 flex-shrink-0 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => handleRegenerateSingleQuestion(sIndex, qIndex)}
+                      disabled={regeneratingQKey === `${sIndex}_${qIndex}`}
+                      className="text-slate-400 hover:text-indigo-600 p-1 rounded hover:bg-slate-100 disabled:opacity-50"
+                      title="এই প্রশ্নটি নতুন করে তৈরি করুন"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${regeneratingQKey === `${sIndex}_${qIndex}` ? 'animate-spin text-indigo-600' : ''}`} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                      className="text-slate-300 hover:text-red-500 p-1 flex-shrink-0 rounded hover:bg-slate-100"
+                      title="মুছুন"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -1392,9 +2030,19 @@ export default function PdfQuestionGeneratorPage() {
                   handleQuestionTextChange(sIndex, 0, val);
                   handleSectionTitleChange(sIndex, val);
                 }}
+                onBlur={(e) => handleAutoSolveQuestion(sIndex, 0, e.target.value)}
                 className="text-sm font-normal text-slate-900 w-full p-1 bg-transparent hover:bg-slate-100 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded border-0"
                 placeholder="গাণিতিক সমস্যা লিখুন..."
               />
+              <button
+                type="button"
+                onClick={() => handleRegenerateSingleQuestion(sIndex, 0)}
+                disabled={regeneratingQKey === `${sIndex}_0`}
+                className="text-slate-400 hover:text-indigo-600 p-1 rounded hover:bg-slate-100 flex-shrink-0 disabled:opacity-50"
+                title="এই প্রশ্নটি নতুন করে তৈরি করুন"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${regeneratingQKey === `${sIndex}_0` ? 'animate-spin text-indigo-600' : ''}`} />
+              </button>
             </div>
             <span className="text-sm font-bold text-slate-800 flex-shrink-0 pt-0.5">
               {secMarksStr}
@@ -1423,9 +2071,19 @@ export default function PdfQuestionGeneratorPage() {
                   handleQuestionTextChange(sIndex, 0, cleaned);
                   handleSectionTitleChange(sIndex, cleaned);
                 }}
+                onBlur={(e) => handleAutoSolveQuestion(sIndex, 0, e.target.value)}
                 className="text-sm font-bold text-slate-900 w-full p-1 bg-transparent hover:bg-slate-100 focus:bg-white focus:ring-1 focus:ring-indigo-500 rounded border-0"
                 placeholder={isComposition ? 'Write a paragraph...' : 'প্রশ্ন লিখুন...'}
               />
+              <button
+                type="button"
+                onClick={() => handleRegenerateSingleQuestion(sIndex, 0)}
+                disabled={regeneratingQKey === `${sIndex}_0`}
+                className="text-slate-400 hover:text-indigo-600 p-1 rounded hover:bg-slate-100 flex-shrink-0 disabled:opacity-50"
+                title="এই প্রশ্নটি নতুন করে তৈরি করুন"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${regeneratingQKey === `${sIndex}_0` ? 'animate-spin text-indigo-600' : ''}`} />
+              </button>
             </div>
             <span className="text-sm font-bold text-slate-800 flex-shrink-0">
               {secMarksStr}
@@ -1458,13 +2116,23 @@ export default function PdfQuestionGeneratorPage() {
                     type="text"
                     value={q.questionText}
                     onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                    onBlur={(e) => handleAutoSolveQuestion(sIndex, qIndex, e.target.value)}
                     className="text-xs font-semibold text-slate-800 w-20 sm:w-28 focus:outline-none"
                     placeholder="Word / শব্দ..."
                   />
                   <button
                     type="button"
+                    onClick={() => handleRegenerateSingleQuestion(sIndex, qIndex)}
+                    disabled={regeneratingQKey === `${sIndex}_${qIndex}`}
+                    className="text-slate-400 hover:text-indigo-600 ml-1 p-0.5 disabled:opacity-50"
+                    title="এই শব্দটি নতুন করে তৈরি করুন"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${regeneratingQKey === `${sIndex}_${qIndex}` ? 'animate-spin text-indigo-600' : ''}`} />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => handleDeleteQuestion(sIndex, qIndex)}
-                    className="text-slate-300 hover:text-red-500 ml-1 p-0.5"
+                    className="text-slate-300 hover:text-red-500 ml-0.5 p-0.5"
                     title="মুছে ফেলুন"
                   >
                     <Trash2 className="w-3 h-3" />
@@ -1493,9 +2161,19 @@ export default function PdfQuestionGeneratorPage() {
                     <AutoResizeTextarea
                       value={cleanQuestionText(q.questionText)}
                       onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                      onBlur={(e) => handleAutoSolveQuestion(sIndex, qIndex, e.target.value)}
                       className="w-full text-xs font-semibold text-slate-900 bg-transparent border-0 focus:ring-1 focus:ring-indigo-500 rounded px-1"
                       placeholder="সমীকরণ / হিসাব..."
                     />
+                    <button
+                      type="button"
+                      onClick={() => handleRegenerateSingleQuestion(sIndex, qIndex)}
+                      disabled={regeneratingQKey === `${sIndex}_${qIndex}`}
+                      className="text-slate-400 hover:text-indigo-600 p-0.5 flex-shrink-0 disabled:opacity-50"
+                      title="নতুন প্রশ্ন তৈরি করুন"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${regeneratingQKey === `${sIndex}_${qIndex}` ? 'animate-spin text-indigo-600' : ''}`} />
+                    </button>
                     <button
                       type="button"
                       onClick={() => handleDeleteQuestion(sIndex, qIndex)}
@@ -1521,9 +2199,19 @@ export default function PdfQuestionGeneratorPage() {
                       <AutoResizeTextarea
                         value={cleanQuestionText(q.questionText)}
                         onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                        onBlur={(e) => handleAutoSolveQuestion(sIndex, qIndex, e.target.value)}
                         className="w-full text-xs font-semibold text-slate-900 bg-transparent border-0 focus:ring-1 focus:ring-indigo-500 rounded px-1"
                         placeholder="সমীকরণ / হিসাব..."
                       />
+                      <button
+                        type="button"
+                        onClick={() => handleRegenerateSingleQuestion(sIndex, qIndex)}
+                        disabled={regeneratingQKey === `${sIndex}_${qIndex}`}
+                        className="text-slate-400 hover:text-indigo-600 p-0.5 flex-shrink-0 disabled:opacity-50"
+                        title="নতুন প্রশ্ন তৈরি করুন"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${regeneratingQKey === `${sIndex}_${qIndex}` ? 'animate-spin text-indigo-600' : ''}`} />
+                      </button>
                       <button
                         type="button"
                         onClick={() => handleDeleteQuestion(sIndex, qIndex)}
@@ -1559,16 +2247,30 @@ export default function PdfQuestionGeneratorPage() {
                 <AutoResizeTextarea
                   value={cleanQuestionText(q.questionText)}
                   onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                  onBlur={(e) => handleAutoSolveQuestion(sIndex, qIndex, e.target.value)}
                   rows={isPunctuation ? 3 : 2}
                   className="w-full text-sm p-2 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 font-medium"
                   placeholder={isEnglish ? 'Enter prompt or paragraph...' : 'প্রশ্ন বা অনুচ্ছেদ লিখুন...'}
                 />
-                <button
-                  onClick={() => handleDeleteQuestion(sIndex, qIndex)}
-                  className="text-slate-300 hover:text-red-500 p-0.5 flex-shrink-0"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                <div className="flex items-center space-x-1 flex-shrink-0 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleRegenerateSingleQuestion(sIndex, qIndex)}
+                    disabled={regeneratingQKey === `${sIndex}_${qIndex}`}
+                    className="text-slate-400 hover:text-indigo-600 p-1 rounded hover:bg-slate-100 disabled:opacity-50"
+                    title="এই অনুচ্ছেদ/প্রশ্নটি নতুন করে তৈরি করুন"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${regeneratingQKey === `${sIndex}_${qIndex}` ? 'animate-spin text-indigo-600' : ''}`} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                    className="text-slate-300 hover:text-red-500 p-1 rounded hover:bg-slate-100"
+                    title="মুছুন"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             ))}
             {(!section.questions || section.questions.length === 0) && (
@@ -1596,21 +2298,35 @@ export default function PdfQuestionGeneratorPage() {
                     <div className="p-1.5 border-r border-slate-300 flex items-center space-x-1.5">
                       <span className="font-bold text-slate-600 flex-shrink-0">{leftLabel}</span>
                       <AutoResizeTextarea
-                        value={cleanQuestionText(q.questionText)}
+                        value={cleanMatchingText(q.questionText)}
                         onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
-                        className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-indigo-500"
+                        onBlur={(e) => handleAutoSolveQuestion(sIndex, qIndex, e.target.value)}
+                        className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-indigo-500 font-medium text-slate-800"
+                        placeholder="বামপাশের অংশ..."
                       />
                     </div>
                     <div className="p-1.5 flex items-center space-x-1.5">
                       {rightLabel && <span className="font-bold text-slate-500 text-2xs flex-shrink-0">{rightLabel}</span>}
                       <AutoResizeTextarea
-                        value={q.answer}
+                        value={cleanMatchingText(q.answer)}
                         onChange={(e) => handleAnswerTextChange(sIndex, qIndex, e.target.value)}
                         className="w-full text-xs p-1 border-0 focus:ring-1 focus:ring-emerald-500 text-emerald-900 font-medium"
+                        placeholder="ডানপাশের অংশ..."
                       />
                       <button
+                        type="button"
+                        onClick={() => handleRegenerateSingleQuestion(sIndex, qIndex)}
+                        disabled={regeneratingQKey === `${sIndex}_${qIndex}`}
+                        className="text-slate-400 hover:text-indigo-600 p-0.5 disabled:opacity-50"
+                        title="এই সারিটি নতুন করে তৈরি করুন"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${regeneratingQKey === `${sIndex}_${qIndex}` ? 'animate-spin text-indigo-600' : ''}`} />
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => handleDeleteQuestion(sIndex, qIndex)}
                         className="text-slate-300 hover:text-red-500 p-0.5"
+                        title="মুছুন"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -1643,15 +2359,29 @@ export default function PdfQuestionGeneratorPage() {
                     <AutoResizeTextarea
                       value={qVal}
                       onChange={(e) => handleQuestionTextChange(sIndex, qIndex, e.target.value)}
+                      onBlur={(e) => handleAutoSolveQuestion(sIndex, qIndex, e.target.value)}
                       rows={1}
                       className="w-full text-sm p-1.5 border border-slate-200 rounded-lg focus:ring-1 focus:ring-indigo-500 font-medium"
                     />
-                    <button
-                      onClick={() => handleDeleteQuestion(sIndex, qIndex)}
-                      className="text-slate-300 hover:text-red-500 p-0.5 flex-shrink-0"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    <div className="flex items-center space-x-1 flex-shrink-0 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() => handleRegenerateSingleQuestion(sIndex, qIndex)}
+                        disabled={regeneratingQKey === `${sIndex}_${qIndex}`}
+                        className="text-slate-400 hover:text-indigo-600 p-1 rounded hover:bg-slate-100 disabled:opacity-50"
+                        title="এই প্রশ্নটি নতুন করে তৈরি করুন"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${regeneratingQKey === `${sIndex}_${qIndex}` ? 'animate-spin text-indigo-600' : ''}`} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteQuestion(sIndex, qIndex)}
+                        className="text-slate-300 hover:text-red-500 p-1 rounded hover:bg-slate-100"
+                        title="মুছুন"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   {/* 2 Options for MCQs */}
@@ -1914,11 +2644,11 @@ export default function PdfQuestionGeneratorPage() {
                                       src.type === 'pdf'
                                         ? 'bg-rose-100 text-rose-700'
                                         : src.type === 'image'
-                                        ? 'bg-emerald-100 text-emerald-700'
+                                        ? (src.isFolder || (src.images && src.images.length > 1) ? 'bg-indigo-100 text-indigo-700' : 'bg-emerald-100 text-emerald-700')
                                         : 'bg-amber-100 text-amber-800'
                                     }`}
                                   >
-                                    {src.type === 'pdf' ? 'PDF' : src.type === 'image' ? 'ছবি' : 'নোট'}
+                                    {src.type === 'pdf' ? 'PDF' : src.type === 'image' ? (src.isFolder || (src.images && src.images.length > 1) ? `📁 ${src.images?.length || src.pageCount}টি ছবি` : 'ছবি') : 'নোট'}
                                   </span>
                                   <span className="text-xs font-bold text-slate-900 truncate" title={src.title}>
                                     {src.title}
@@ -1926,6 +2656,7 @@ export default function PdfQuestionGeneratorPage() {
                                 </div>
                                 <p className="text-[10px] text-slate-500 mt-0.5">
                                   {src.type === 'pdf' && `মোট পৃষ্ঠা: ${src.pageCount || 1} • `}
+                                  {src.type === 'image' && (src.isFolder || (src.images && src.images.length > 1)) && `মোট ছবি: ${src.images?.length || src.pageCount}টি • `}
                                   {formatBytes(src.size)}
                                 </p>
                               </div>
@@ -2176,6 +2907,114 @@ export default function PdfQuestionGeneratorPage() {
                               )}
                             </div>
                           )}
+
+                          {/* Multi-Image Folder Options (Select individual images or all) */}
+                          {src.type === 'image' && (src.isFolder || (src.images && src.images.length > 1)) && cfg.selected && (
+                            <div className="pt-2 border-t border-indigo-100/80 space-y-2">
+                              <div className="space-y-1.5">
+                                {/* Header / Controls */}
+                                <div className="flex items-center justify-between text-[11px] font-bold text-indigo-950">
+                                  <span className="flex items-center">
+                                    <ImageIcon className="w-3.5 h-3.5 mr-1 text-indigo-600" />
+                                    ছবি নির্বাচন ({((cfg.selectedImageIds !== undefined ? cfg.selectedImageIds : (src.images || []).map((img) => img.id)) || []).length}/{src.images?.length || src.pageCount || 1})
+                                  </span>
+
+                                  <div className="flex items-center space-x-1.5 text-[10px]">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedSourceConfigs((prev) => ({
+                                          ...prev,
+                                          [src.id]: {
+                                            ...cfg,
+                                            selectedImageIds: (src.images || []).map((img) => img.id),
+                                          },
+                                        }));
+                                      }}
+                                      className="text-indigo-600 font-bold hover:underline"
+                                    >
+                                      সব
+                                    </button>
+                                    <span className="text-slate-300">|</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedSourceConfigs((prev) => ({
+                                          ...prev,
+                                          [src.id]: {
+                                            ...cfg,
+                                            selectedImageIds: [],
+                                          },
+                                        }));
+                                      }}
+                                      className="text-slate-500 hover:text-slate-800"
+                                    >
+                                      মুছুন
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Images Checklist */}
+                                <div className="space-y-1 max-h-44 overflow-y-auto pr-0.5 bg-white/80 p-1.5 rounded-xl border border-indigo-100">
+                                  {(src.images || []).map((img, imgIdx) => {
+                                    const effectiveSelectedIds = cfg.selectedImageIds !== undefined
+                                      ? cfg.selectedImageIds
+                                      : (src.images || []).map((m) => m.id);
+                                    const isImgChecked = effectiveSelectedIds.includes(img.id);
+
+                                    return (
+                                      <label
+                                        key={img.id || imgIdx}
+                                        className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer transition ${
+                                          isImgChecked
+                                            ? 'bg-indigo-50 border-indigo-300 text-indigo-950 font-bold shadow-2xs'
+                                            : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 font-medium'
+                                        }`}
+                                      >
+                                        <div className="flex items-center space-x-2 overflow-hidden flex-1 mr-1">
+                                          <input
+                                            type="checkbox"
+                                            checked={isImgChecked}
+                                            onChange={(e) => {
+                                              const currentIds = cfg.selectedImageIds !== undefined
+                                                ? cfg.selectedImageIds
+                                                : (src.images || []).map((m) => m.id);
+                                              const newIds = e.target.checked
+                                                ? [...currentIds, img.id]
+                                                : currentIds.filter((id) => id !== img.id);
+                                              setSelectedSourceConfigs((prev) => ({
+                                                ...prev,
+                                                [src.id]: {
+                                                  ...cfg,
+                                                  selectedImageIds: newIds,
+                                                },
+                                              }));
+                                            }}
+                                            className="h-3.5 w-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 flex-shrink-0"
+                                          />
+                                          {img.url ? (
+                                            <img
+                                              src={img.url}
+                                              alt={img.title || `ছবি ${imgIdx + 1}`}
+                                              className="w-7 h-7 object-cover rounded border border-slate-200 flex-shrink-0 bg-slate-100"
+                                            />
+                                          ) : (
+                                            <div className="w-7 h-7 rounded bg-slate-100 flex items-center justify-center flex-shrink-0 text-slate-400 text-[10px]">
+                                              🖼️
+                                            </div>
+                                          )}
+                                          <span className="truncate text-[11px] font-medium">{img.title || img.name || `ছবি ${imgIdx + 1}`}</span>
+                                        </div>
+                                        <span className="text-[10px] text-indigo-700 bg-indigo-100/80 px-1.5 py-0.5 rounded flex-shrink-0 font-semibold">
+                                          #{imgIdx + 1}
+                                        </span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -2381,6 +3220,7 @@ export default function PdfQuestionGeneratorPage() {
                                       const secCfg = sec.sourceConfigs?.[src.id];
                                       const isSrcChecked = Boolean(secCfg?.selected);
                                       const hasChaps = src.type === 'pdf' && Array.isArray(src.chapters) && src.chapters.length > 0;
+                                      const isMultiImg = src.type === 'image' && (src.isFolder || (Array.isArray(src.images) && src.images.length > 1));
                                       const selectedChapIds = secCfg?.selectedChapterIds || [];
 
                                       return (
@@ -2402,11 +3242,11 @@ export default function PdfQuestionGeneratorPage() {
                                                 className="h-3.5 w-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
                                               />
                                               <span className="text-xs font-bold text-slate-800 truncate">
-                                                {src.type === 'pdf' ? '📕' : src.type === 'image' ? '🖼️' : '📝'} {src.title}
+                                                {src.type === 'pdf' ? '📕' : src.type === 'image' ? (isMultiImg ? '📁' : '🖼️') : '📝'} {src.title}
                                               </span>
                                             </label>
                                             <span className="text-[10px] text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200 flex-shrink-0 font-medium">
-                                              {hasChaps ? `${src.chapters.length}টি অধ্যায়` : src.type === 'pdf' ? `${src.pageCount || 1} পৃষ্ঠা` : src.type === 'image' ? 'ছবি' : 'নোট'}
+                                              {hasChaps ? `${src.chapters.length}টি অধ্যায়` : src.type === 'pdf' ? `${src.pageCount || 1} পৃষ্ঠা` : isMultiImg ? `${src.images?.length || src.pageCount}টি ছবি` : src.type === 'image' ? 'ছবি' : 'নোট'}
                                             </span>
                                           </div>
 
@@ -2457,6 +3297,74 @@ export default function PdfQuestionGeneratorPage() {
                                                       </div>
                                                       <span className="text-[9px] text-indigo-700 bg-indigo-100/80 px-1 py-0.2 rounded flex-shrink-0 font-medium">
                                                         পৃ: {chap.startPage}-{chap.endPage}
+                                                      </span>
+                                                    </label>
+                                                  );
+                                                })}
+                                              </div>
+                                            </div>
+                                          )}
+
+                                          {/* Multi-Image Folder Checklist if Image source has multiple images and is selected */}
+                                          {isSrcChecked && isMultiImg && (
+                                            <div className="mt-2 pl-5 space-y-1.5 pt-1.5 border-t border-indigo-100/70">
+                                              <div className="flex items-center justify-between text-[10px]">
+                                                <span className="font-bold text-indigo-900">ছবি নির্বাচন:</span>
+                                                <div className="flex items-center space-x-1.5">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleSelectAllSecImages(idx, src.id, true)}
+                                                    className="text-indigo-600 hover:text-indigo-800 font-bold"
+                                                  >
+                                                    সব ছবি
+                                                  </button>
+                                                  <span className="text-slate-300">|</span>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleSelectAllSecImages(idx, src.id, false)}
+                                                    className="text-slate-500 hover:text-slate-700"
+                                                  >
+                                                    ক্লিয়ার
+                                                  </button>
+                                                </div>
+                                              </div>
+
+                                              <div className="space-y-1 max-h-36 overflow-y-auto pr-0.5 bg-white p-1 rounded-lg border border-indigo-100">
+                                                {(src.images || []).map((img, imgIdx) => {
+                                                  const isImgChecked = (secCfg?.selectedImageIds !== undefined
+                                                    ? secCfg.selectedImageIds
+                                                    : (src.images || []).map((m) => m.id)
+                                                  ).includes(img.id);
+
+                                                  return (
+                                                    <label
+                                                      key={img.id || imgIdx}
+                                                      className={`flex items-center justify-between px-2 py-1 rounded text-[11px] cursor-pointer transition ${
+                                                        isImgChecked
+                                                          ? 'bg-indigo-50 text-indigo-950 font-bold border border-indigo-200'
+                                                          : 'text-slate-600 hover:bg-slate-50 font-medium'
+                                                      }`}
+                                                    >
+                                                      <div className="flex items-center space-x-1.5 overflow-hidden flex-1 mr-1">
+                                                        <input
+                                                          type="checkbox"
+                                                          checked={isImgChecked}
+                                                          onChange={() => handleToggleSecImage(idx, src.id, img.id)}
+                                                          className="h-3 w-3 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 flex-shrink-0"
+                                                        />
+                                                        {img.url ? (
+                                                          <img
+                                                            src={img.url}
+                                                            alt={img.title || `ছবি ${imgIdx + 1}`}
+                                                            className="w-5 h-5 object-cover rounded border border-slate-200 flex-shrink-0 bg-slate-100"
+                                                          />
+                                                        ) : (
+                                                          <span className="text-[10px]">🖼️</span>
+                                                        )}
+                                                        <span className="truncate">{img.title || img.name || `ছবি ${imgIdx + 1}`}</span>
+                                                      </div>
+                                                      <span className="text-[9px] text-indigo-700 bg-indigo-100/80 px-1 py-0.2 rounded flex-shrink-0 font-medium">
+                                                        #{imgIdx + 1}
                                                       </span>
                                                     </label>
                                                   );
@@ -2634,27 +3542,29 @@ export default function PdfQuestionGeneratorPage() {
               {(() => {
                 const hasSelectedSources = Object.values(selectedSourceConfigs).some((c) => c.selected) || sectionList.some((s) => s.enabled && s.sourceId);
                 return (
-                  <button
-                    onClick={handleGenerateQuestions}
-                    disabled={isProcessing || !hasSelectedSources}
-                    className={`w-full mt-4 flex items-center justify-center py-3 px-4 rounded-xl text-sm font-bold text-white shadow-xs transition-all ${
-                      isProcessing || !hasSelectedSources
-                        ? 'bg-slate-400 cursor-not-allowed'
-                        : 'bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99]'
-                    }`}
-                  >
-                    {isProcessing ? (
-                      <>
-                        <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                        প্রশ্ন তৈরি হচ্ছে...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-5 h-5 mr-2" />
-                        প্রশ্নপত্র তৈরি করুন
-                      </>
-                    )}
-                  </button>
+                  <div className="space-y-2 mt-4">
+                    <button
+                      onClick={handleGenerateQuestions}
+                      disabled={isProcessing || !hasSelectedSources}
+                      className={`w-full flex items-center justify-center py-3 px-4 rounded-xl text-sm font-bold text-white shadow-xs transition-all ${
+                        isProcessing || !hasSelectedSources
+                          ? 'bg-slate-400 cursor-not-allowed'
+                          : 'bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99]'
+                      }`}
+                    >
+                      {isProcessing ? (
+                        <>
+                          <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                          প্রশ্ন তৈরি হচ্ছে...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-5 h-5 mr-2" />
+                          প্রশ্নপত্র তৈরি করুন
+                        </>
+                      )}
+                    </button>
+                  </div>
                 );
               })()}
 
@@ -2703,52 +3613,62 @@ export default function PdfQuestionGeneratorPage() {
             {generatedData ? (
               <div className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden min-h-[850px] flex flex-col">
                 {/* Top Action & View Toggle Bar */}
-                <div className="p-4 border-b border-slate-200 bg-slate-50 flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3.5">
+                <div className="p-3.5 sm:p-4 border-b border-slate-200 bg-slate-50/90 flex flex-wrap items-center justify-between gap-3">
                   
                   {/* Toggle Switch: Question Paper vs Answer Key */}
-                  <div className="inline-flex p-1 bg-slate-200/90 rounded-xl border border-slate-300 shadow-inner">
+                  <div className="inline-flex p-1 bg-slate-200/90 rounded-xl border border-slate-300 shadow-inner flex-shrink-0">
                     <button
                       type="button"
                       onClick={() => setPreviewMode('question')}
-                      className={`inline-flex items-center px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+                      className={`inline-flex items-center px-3.5 py-1.5 sm:px-4 sm:py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
                         previewMode === 'question'
                           ? 'bg-white text-indigo-700 shadow-xs'
                           : 'text-slate-600 hover:text-slate-900'
                       }`}
                     >
-                      <FileText className="w-4 h-4 mr-2 text-indigo-600" />
-                      প্রশ্নপত্র ভিউ
+                      <FileText className="w-4 h-4 mr-1.5 text-indigo-600 flex-shrink-0" />
+                      প্রশ্নপত্র
                     </button>
                     <button
                       type="button"
                       onClick={() => setPreviewMode('answer')}
-                      className={`inline-flex items-center px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+                      className={`inline-flex items-center px-3.5 py-1.5 sm:px-4 sm:py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
                         previewMode === 'answer'
                           ? 'bg-white text-emerald-700 shadow-xs'
                           : 'text-slate-600 hover:text-slate-900'
                       }`}
                     >
-                      <CheckCircle2 className="w-4 h-4 mr-2 text-emerald-600" />
-                      উত্তরমালা ভিউ (লাইভ এডিট ও AI)
+                      <CheckCircle2 className="w-4 h-4 mr-1.5 text-emerald-600 flex-shrink-0" />
+                      উত্তরমালা (লাইভ এডিট)
                     </button>
                   </div>
 
-                  {/* Export Buttons */}
-                  <div className="flex flex-wrap items-center gap-2.5">
+                  {/* Actions & Export Buttons */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleRegenerateQuestions}
+                      disabled={isProcessing}
+                      className="inline-flex items-center px-3 py-1.5 sm:px-3.5 sm:py-2 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl shadow-xs transition active:scale-95 disabled:opacity-50 whitespace-nowrap"
+                      title="বিদ্যমান সোর্স থেকে নতুন প্রশ্ন তৈরি করুন (আগের প্রশ্নগুলো বাদ দিয়ে)"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 mr-1.5 text-indigo-600 flex-shrink-0 ${isProcessing ? 'animate-spin' : ''}`} />
+                      প্রশ্ন রিজেনারেট
+                    </button>
                     <button
                       type="button"
                       onClick={() => handleExport(false)}
-                      className="inline-flex items-center px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs transition"
+                      className="inline-flex items-center px-3 py-1.5 sm:px-3.5 sm:py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs transition active:scale-95 whitespace-nowrap"
                     >
-                      <Download className="w-4 h-4 mr-1.5" />
+                      <Download className="w-3.5 h-3.5 mr-1.5 flex-shrink-0" />
                       প্রশ্নপত্র DOCX
                     </button>
                     <button
                       type="button"
                       onClick={() => handleExport(true)}
-                      className="inline-flex items-center px-4 py-2 text-xs font-bold text-indigo-700 bg-white hover:bg-indigo-50 border border-indigo-300 rounded-xl shadow-xs transition"
+                      className="inline-flex items-center px-3 py-1.5 sm:px-3.5 sm:py-2 text-xs font-bold text-indigo-700 bg-white hover:bg-indigo-50 border border-indigo-300 rounded-xl shadow-xs transition active:scale-95 whitespace-nowrap"
                     >
-                      <FileCheck className="w-4 h-4 mr-1.5 text-emerald-600" />
+                      <FileCheck className="w-3.5 h-3.5 mr-1.5 text-emerald-600 flex-shrink-0" />
                       উত্তরমালা সহ DOCX
                     </button>
                   </div>
@@ -2862,11 +3782,8 @@ export default function PdfQuestionGeneratorPage() {
                           
                           const isSinglePrompt = isPoem || isPunctuation || isLetter || isEssay || isSummary || isAmplification || ((section.id?.includes('theme') || section.id?.includes('long') || section.title?.includes('মূলভাব') || section.title?.includes('রচনা') || section.title?.includes('বর্ণনামূলক') || section.title?.includes('দরখাস্ত') || section.title?.includes('চিঠি')) && section.questions?.length <= 1) || (section.questions?.length === 1 && !isMcq);
                           
-                          const isShortQuestion = section.id?.includes('short') || section.title?.includes('সংক্ষেপ') || section.title?.includes('সংক্ষিপ্ত') || section.title?.includes('ছোট');
-                          const isLongQuestion = section.id?.includes('long') || section.title?.includes('রচনামূলক') || section.title?.includes('বর্ণনামূলক') || section.title?.includes('কাঠামোবদ্ধ') || section.title?.includes('নিচের প্রশ্ন') || section.title?.includes('প্রশ্নের উত্তর') || section.title?.includes('মূলভাব');
-                          const isQaQuestion = section.id?.includes('qa') || section.id?.includes('desc') || section.id === 'en_questions' || section.id?.startsWith('math_word_prob');
-                          
-                          const isQuestionWithAi = (sIndex !== 0) && (isShortQuestion || isLongQuestion || isQaQuestion) && !isVocab && !isSentence && !isConjunct && !isOpposite && !isOneWord && !isSynonym && !isBagdhara && !isPunctuation && !isMcq && !isMatchSec && !isFib && !isTf && !isOral && !isPoem;
+                          // Enable AI Solve and toolbar across ALL questions in every section (except poem and oral)
+                          const isQuestionWithAi = !isOral && !isPoem;
 
                           if (isOral) return null;
 
@@ -2881,10 +3798,10 @@ export default function PdfQuestionGeneratorPage() {
                                 </span>
                               </div>
 
-                              {/* Case 1: Poem - No answer key needed as requested */}
+                              {/* Case 1: Poem or Rhyme - No answer key needed as requested */}
                               {isPoem ? (
                                 <div className="p-3 bg-white rounded-xl border border-slate-200 text-xs text-slate-500 italic">
-                                  📖 কবিতার উত্তর দেওয়ার প্রয়োজন নেই (শিক্ষার্থীরা পাঠ্যবই থেকে মুখস্থ লিখবে)।
+                                  📖 {isEnglish ? 'Rhyme / Poem does not require an answer key (students write from memory).' : 'কবিতা / Rhyme-এর উত্তর দেওয়ার প্রয়োজন নেই (শিক্ষার্থীরা পাঠ্যবই থেকে মুখস্থ লিখবে)।'}
                                 </div>
                               ) : (
                                 /* Other Section Answers */
@@ -2988,6 +3905,16 @@ export default function PdfQuestionGeneratorPage() {
                                           {isQuestionWithAi && (
                                             <div className="flex flex-wrap items-center justify-between gap-2 pl-8 pt-1">
                                               <div className="flex flex-wrap items-center gap-1.5">
+                                                <button
+                                                  type="button"
+                                                  disabled={isCurrentlyRefining}
+                                                  onClick={() => handleAutoSolveQuestion(sIndex, qIndex, q.questionText)}
+                                                  className="inline-flex items-center px-2.5 py-1 text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition disabled:opacity-50"
+                                                  title="প্রশ্নের সাথে মিলিয়ে নতুন নির্ভুল উত্তর তৈরি করুন"
+                                                >
+                                                  🤖 প্রশ্ন অনুযায়ী সমাধান
+                                                </button>
+
                                                 <button
                                                   type="button"
                                                   disabled={isCurrentlyRefining}

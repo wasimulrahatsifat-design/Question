@@ -147,6 +147,7 @@ export default function AdminPage() {
   const [storageProvider, setStorageProvider] = useState('supabase'); // 'supabase' | 'uploadthing'
   const [sourceTitle, setSourceTitle] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
+  const [selectedFiles, setSelectedFiles] = useState([]); // Multiple files for image folder
   const [textContent, setTextContent] = useState('');
   const [pdfPageCount, setPdfPageCount] = useState(1);
   const [isUploading, setIsUploading] = useState(false);
@@ -163,6 +164,7 @@ export default function AdminPage() {
   // Preview Modal
   const [previewItem, setPreviewItem] = useState(null);
   const [previewContent, setPreviewContent] = useState(null);
+  const [activePreviewImgIndex, setActivePreviewImgIndex] = useState(0);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
 
   // Chapter Management Modal State
@@ -544,39 +546,70 @@ export default function AdminPage() {
     }
   };
 
-  // Handle file selection
+  // Handle file selection (Single PDF or Multiple Images)
   const handleFileChange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
 
-    setSelectedFile(file);
-    if (!sourceTitle) {
-      const baseName = file.name.replace(/\.[^/.]+$/, '');
-      setSourceTitle(baseName);
-    }
+    if (sourceType === 'image') {
+      const newFiles = [...selectedFiles, ...files];
+      setSelectedFiles(newFiles);
+      setSelectedFile(newFiles[0]);
+      if (!sourceTitle) {
+        const baseName = files[0].name.replace(/\.[^/.]+$/, '');
+        setSourceTitle(newFiles.length > 1 ? `${baseName} (${newFiles.length}টি ছবি)` : baseName);
+      }
+    } else {
+      const file = files[0];
+      setSelectedFile(file);
+      setSelectedFiles([file]);
+      if (!sourceTitle) {
+        const baseName = file.name.replace(/\.[^/.]+$/, '');
+        setSourceTitle(baseName);
+      }
 
-    if (file.type === 'application/pdf') {
-      try {
-        const buffer = await file.arrayBuffer();
-        const text = new TextDecoder('latin1').decode(buffer);
-        // Find all /Type /Page (excluding /Pages)
-        const pageMatches = text.match(/\/Type\s*\/Page[^s]/g);
-        if (pageMatches && pageMatches.length > 0) {
-          setPdfPageCount(pageMatches.length);
-        } else {
-          // Fallback: look for /Count in /Pages catalog
-          const countMatch = text.match(/\/Type\s*\/Pages[\s\S]*?\/Count\s+(\d+)/);
-          if (countMatch && countMatch[1]) {
-            setPdfPageCount(parseInt(countMatch[1], 10));
+      if (file.type === 'application/pdf') {
+        try {
+          const buffer = await file.arrayBuffer();
+          const text = new TextDecoder('latin1').decode(buffer);
+          // Find all /Type /Page (excluding /Pages)
+          const pageMatches = text.match(/\/Type\s*\/Page[^s]/g);
+          if (pageMatches && pageMatches.length > 0) {
+            setPdfPageCount(pageMatches.length);
           } else {
-            setPdfPageCount(1);
+            // Fallback: look for /Count in /Pages catalog
+            const countMatch = text.match(/\/Type\s*\/Pages[\s\S]*?\/Count\s+(\d+)/);
+            if (countMatch && countMatch[1]) {
+              setPdfPageCount(parseInt(countMatch[1], 10));
+            } else {
+              setPdfPageCount(1);
+            }
           }
+        } catch (err) {
+          console.warn('Could not read PDF page count:', err);
+          setPdfPageCount(1);
         }
-      } catch (err) {
-        console.warn('Could not read PDF page count:', err);
-        setPdfPageCount(1);
       }
     }
+  };
+
+  const handleRemoveSelectedFile = (idxToRemove) => {
+    setSelectedFiles((prev) => {
+      const updated = prev.filter((_, i) => i !== idxToRemove);
+      if (updated.length === 0) {
+        setSelectedFile(null);
+      } else {
+        setSelectedFile(updated[0]);
+      }
+      return updated;
+    });
+  };
+
+  const handleClearSelectedFiles = () => {
+    setSelectedFiles([]);
+    setSelectedFile(null);
+    const fileInput = document.getElementById('source-file-input');
+    if (fileInput) fileInput.value = '';
   };
 
   // Handle Save Source
@@ -587,8 +620,14 @@ export default function AdminPage() {
       return;
     }
 
-    if (sourceType !== 'text' && !selectedFile) {
-      showToast('অনুগ্রহ করে ফাইল (পিডিএফ বা ছবি) নির্বাচন করুন!', 'error');
+    const hasImageFiles = selectedFiles.length > 0 || selectedFile;
+    if (sourceType === 'image' && !hasImageFiles) {
+      showToast('অনুগ্রহ করে অন্তত একটি ছবি নির্বাচন করুন!', 'error');
+      return;
+    }
+
+    if (sourceType === 'pdf' && !selectedFile) {
+      showToast('অনুগ্রহ করে পিডিএফ ফাইল নির্বাচন করুন!', 'error');
       return;
     }
 
@@ -601,30 +640,38 @@ export default function AdminPage() {
     setUploadProgressMsg('আপলোড প্রস্তুত করা হচ্ছে...');
 
     try {
+      const imageFilesList = selectedFiles.length > 0 ? selectedFiles : (selectedFile ? [selectedFile] : []);
       const savedResult = await saveSource({
         title: sourceTitle.trim(),
         className: selectedClass,
         subject: selectedSubject,
         type: sourceType,
         file: selectedFile,
+        files: sourceType === 'image' ? imageFilesList : (selectedFile ? [selectedFile] : []),
         textContent: textContent.trim(),
-        pageCount: pdfPageCount,
+        pageCount: sourceType === 'image' ? (imageFilesList.length || 1) : pdfPageCount,
         storageProvider: storageProvider,
         onProgress: (percent) => {
           const provLabel = storageProvider === 'uploadthing' ? 'UploadThing' : 'Supabase Storage';
-          setUploadProgressMsg(`${provLabel} এ আপলোড হচ্ছে... ${percent}%`);
+          if (sourceType === 'image' && imageFilesList.length > 1) {
+            setUploadProgressMsg(`${provLabel} এ ${imageFilesList.length}টি ছবি আপলোড হচ্ছে... ${percent}%`);
+          } else {
+            setUploadProgressMsg(`${provLabel} এ আপলোড হচ্ছে... ${percent}%`);
+          }
         },
       });
 
+      const countLabel = sourceType === 'image' && imageFilesList.length > 1 ? ` (${imageFilesList.length}টি ছবি ফোল্ডার)` : '';
       if (savedResult?.provider === 'uploadthing') {
-        showToast(`✅ "${sourceTitle}" UploadThing ক্লাউডে আপলোড ও Supabase ডেটাবেজে সংরক্ষিত হয়েছে!`, 'success');
+        showToast(`✅ "${sourceTitle}"${countLabel} UploadThing ক্লাউডে আপলোড ও Supabase ডেটাবেজে সংরক্ষিত হয়েছে!`, 'success');
       } else {
-        showToast(`✅ "${sourceTitle}" Supabase Storage ও ডেটাবেজে সফলভাবে সংরক্ষিত হয়েছে!`, 'success');
+        showToast(`✅ "${sourceTitle}"${countLabel} Supabase Storage ও ডেটাবেজে সফলভাবে সংরক্ষিত হয়েছে!`, 'success');
       }
 
       // Reset form
       setSourceTitle('');
       setSelectedFile(null);
+      setSelectedFiles([]);
       setTextContent('');
       setPdfPageCount(1);
       const fileInput = document.getElementById('source-file-input');
@@ -672,15 +719,30 @@ export default function AdminPage() {
   // Handle Preview
   const handleOpenPreview = async (src) => {
     setPreviewItem(src);
+    setActivePreviewImgIndex(0);
     setIsLoadingPreview(true);
     try {
-      const content = await getSourceContent(src);
-      if (src.type === 'image' && content instanceof Blob) {
-        setPreviewContent(URL.createObjectURL(content));
+      if (src.type === 'image') {
+        if (Array.isArray(src.images) && src.images.length > 0) {
+          setPreviewContent(src.images[0].url || src.publicUrl || src.fileUrl);
+        } else {
+          const content = await getSourceContent(src);
+          if (content instanceof Blob) {
+            setPreviewContent(URL.createObjectURL(content));
+          } else if (src.publicUrl || src.fileUrl) {
+            setPreviewContent(src.publicUrl || src.fileUrl);
+          }
+        }
       } else if (src.type === 'text') {
+        const content = await getSourceContent(src);
         setPreviewContent(content);
-      } else if (src.type === 'pdf' && content instanceof Blob) {
-        setPreviewContent(URL.createObjectURL(content));
+      } else if (src.type === 'pdf') {
+        const content = await getSourceContent(src);
+        if (content instanceof Blob) {
+          setPreviewContent(URL.createObjectURL(content));
+        } else if (src.publicUrl || src.fileUrl) {
+          setPreviewContent(src.publicUrl || src.fileUrl);
+        }
       }
     } catch (err) {
       console.error('Preview error:', err);
@@ -1623,30 +1685,96 @@ CRITICAL INSTRUCTIONS FOR PROMPT GENERATION:
                   )}
 
                   {sourceType === 'image' && (
-                    <div>
-                      <label className="block text-sm font-semibold text-slate-700 mb-1">
-                        ছবি (JPG / PNG / WebP) নির্বাচন করুন
-                      </label>
-                      <div className="border-2 border-dashed border-slate-300 hover:border-emerald-400 rounded-xl p-5 text-center bg-slate-50/50 transition">
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-sm font-semibold text-slate-700">
+                          ছবি নির্বাচন করুন (একক ছবি বা একসাথে একাধিক ছবি / ফোল্ডার)
+                        </label>
+                        <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                          📁 মাল্টিপল ছবি সাপোর্ট
+                        </span>
+                      </div>
+
+                      {/* Dropzone / File Picker */}
+                      <div className="border-2 border-dashed border-slate-300 hover:border-emerald-500 rounded-xl p-5 text-center bg-slate-50/50 transition">
                         <input
                           id="source-file-input"
                           type="file"
                           accept="image/*"
+                          multiple
                           onChange={handleFileChange}
                           className="sr-only"
                         />
                         <label htmlFor="source-file-input" className="cursor-pointer block">
-                          <ImageIcon className="w-8 h-8 mx-auto text-emerald-500 mb-1.5" />
-                          <span className="text-sm font-bold text-emerald-600 hover:underline">
-                            {selectedFile ? selectedFile.name : 'বইয়ের পাতার ছবি আপলোড করুন'}
+                          <div className="w-12 h-12 mx-auto bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mb-2 shadow-xs">
+                            <ImageIcon className="w-6 h-6" />
+                          </div>
+                          <span className="text-sm font-bold text-emerald-700 hover:underline">
+                            {selectedFiles.length > 0
+                              ? `আরও ছবি যুক্ত করতে ক্লিক করুন`
+                              : `এক বা একাধিক ছবি নির্বাচন করুন (ফোল্ডার আকারে সেভ হবে)`}
                           </span>
                           <p className="text-xs text-slate-400 mt-1">
-                            {selectedFile
-                              ? `${formatBytes(selectedFile.size)}`
-                              : 'বইয়ের পৃষ্ঠা, হাতে লেখা নোট বা প্রশ্নপত্রের ছবি'}
+                            JPG, PNG, WebP • একসাথে একাধিক ছবি সিলেক্ট করতে <kbd className="px-1.5 py-0.5 bg-slate-200 text-slate-700 rounded text-[10px] font-mono">Ctrl</kbd> বা <kbd className="px-1.5 py-0.5 bg-slate-200 text-slate-700 rounded text-[10px] font-mono">Shift</kbd> চেপে সিলেক্ট করুন
                           </p>
                         </label>
                       </div>
+
+                      {/* Selected Images List / Thumbnails Gallery */}
+                      {selectedFiles.length > 0 && (
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                              <span>📁 নির্বাচিত ছবিসমূহ:</span>
+                              <span className="bg-emerald-100 text-emerald-800 text-[11px] px-2 py-0.5 rounded-full font-bold">
+                                {selectedFiles.length}টি ছবি
+                              </span>
+                              <span className="text-slate-400 font-normal">
+                                ({formatBytes(selectedFiles.reduce((sum, f) => sum + f.size, 0))})
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleClearSelectedFiles}
+                              className="text-xs text-rose-600 hover:text-rose-800 font-bold hover:underline"
+                            >
+                              সব মুছুন
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-h-48 overflow-y-auto p-1 bg-white rounded-lg border border-slate-200">
+                            {selectedFiles.map((f, fIdx) => (
+                              <div
+                                key={fIdx}
+                                className="relative group bg-slate-50 p-1.5 rounded-lg border border-slate-200 flex flex-col items-center text-center overflow-hidden"
+                              >
+                                <span className="absolute top-1 left-1 bg-slate-800/80 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-md">
+                                  #{fIdx + 1}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveSelectedFile(fIdx)}
+                                  className="absolute top-1 right-1 bg-rose-500 hover:bg-rose-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shadow-xs transition"
+                                  title="মুছে ফেলুন"
+                                >
+                                  ✕
+                                </button>
+                                <div className="w-full h-14 bg-slate-100 rounded flex items-center justify-center overflow-hidden my-1">
+                                  <img
+                                    src={URL.createObjectURL(f)}
+                                    alt={f.name}
+                                    className="w-full h-full object-cover"
+                                  />
+                                </div>
+                                <p className="text-[10px] font-medium text-slate-700 truncate w-full px-1" title={f.name}>
+                                  {f.name}
+                                </p>
+                                <p className="text-[9px] text-slate-400">{formatBytes(f.size)}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1864,11 +1992,17 @@ CRITICAL INSTRUCTIONS FOR PROMPT GENERATION:
                               </span>
                               <span className="text-slate-500">
                                 {src.type === 'pdf' && `মোট পৃষ্ঠা: ${src.pageCount || 1} • `}
+                                {src.type === 'image' && (src.isFolder || (src.images && src.images.length > 1) ? `মোট ছবি: ${src.images?.length || src.pageCount}টি • ` : '')}
                                 {formatBytes(src.size)}
                               </span>
                               <span className="text-slate-500">
                                 • {new Date(src.createdAt).toLocaleDateString('bn-BD')}
                               </span>
+                              {src.type === 'image' && (src.isFolder || (src.images && src.images.length > 1)) && (
+                                <span className="text-[11px] font-bold px-2 py-0.5 rounded border bg-blue-50 text-blue-700 border-blue-200 flex items-center gap-1">
+                                  📁 {src.images?.length || src.pageCount}টি ছবির ফোল্ডার
+                                </span>
+                              )}
                               <span
                                 className={`text-[11px] font-bold px-2 py-0.5 rounded border ${
                                   src.provider === 'uploadthing' || src.storageType === 'uploadthing'
@@ -3503,14 +3637,85 @@ CRITICAL INSTRUCTIONS FOR PROMPT GENERATION:
                   <Loader2 className="w-6 h-6 animate-spin mx-auto text-indigo-500" />
                   <p className="text-sm">প্রিভিউ প্রস্তুত করা হচ্ছে...</p>
                 </div>
-              ) : previewItem.type === 'image' && previewContent ? (
-                <div className="text-center">
-                  <img
-                    src={previewContent}
-                    alt={previewItem.title}
-                    className="max-h-[60vh] mx-auto rounded-lg shadow-sm border border-slate-200"
-                  />
-                </div>
+              ) : previewItem.type === 'image' ? (
+                Array.isArray(previewItem.images) && previewItem.images.length > 1 ? (
+                  <div className="space-y-4">
+                    {/* Gallery Navigation Bar */}
+                    <div className="flex items-center justify-between bg-slate-100 px-3.5 py-2 rounded-xl border border-slate-200">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-xs font-bold text-slate-700">
+                          📁 ফোল্ডারের ছবিসমূহ:
+                        </span>
+                        <span className="bg-emerald-600 text-white text-[11px] font-bold px-2.5 py-0.5 rounded-full">
+                          ছবি {activePreviewImgIndex + 1} / {previewItem.images.length}
+                        </span>
+                      </div>
+                      <div className="flex items-center space-x-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setActivePreviewImgIndex((prev) => Math.max(0, prev - 1))}
+                          disabled={activePreviewImgIndex === 0}
+                          className="px-2.5 py-1 bg-white hover:bg-slate-200 disabled:opacity-40 text-xs font-bold text-slate-700 rounded-lg border border-slate-300 shadow-2xs transition"
+                        >
+                          ◀ পূর্ববর্তী
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActivePreviewImgIndex((prev) => Math.min(previewItem.images.length - 1, prev + 1))}
+                          disabled={activePreviewImgIndex === previewItem.images.length - 1}
+                          className="px-2.5 py-1 bg-white hover:bg-slate-200 disabled:opacity-40 text-xs font-bold text-slate-700 rounded-lg border border-slate-300 shadow-2xs transition"
+                        >
+                          পরবর্তী ▶
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Main Active Image Display */}
+                    <div className="text-center bg-slate-900/5 p-2 rounded-xl border border-slate-200 flex flex-col items-center">
+                      <img
+                        src={previewItem.images[activePreviewImgIndex]?.url || previewContent}
+                        alt={`${previewItem.title} - ছবি ${activePreviewImgIndex + 1}`}
+                        className="max-h-[50vh] object-contain rounded-lg shadow-sm"
+                      />
+                      <p className="text-xs font-medium text-slate-500 mt-2">
+                        {previewItem.images[activePreviewImgIndex]?.title || previewItem.images[activePreviewImgIndex]?.name || `পৃষ্ঠা ${activePreviewImgIndex + 1}`}
+                      </p>
+                    </div>
+
+                    {/* Thumbnail Strip */}
+                    <div className="flex space-x-2 overflow-x-auto p-1.5 bg-slate-50 rounded-xl border border-slate-200">
+                      {previewItem.images.map((img, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setActivePreviewImgIndex(idx)}
+                          className={`flex-shrink-0 relative rounded-lg overflow-hidden w-16 h-16 border-2 transition ${
+                            activePreviewImgIndex === idx
+                              ? 'border-emerald-600 ring-2 ring-emerald-200 shadow-xs scale-105'
+                              : 'border-slate-200 opacity-70 hover:opacity-100'
+                          }`}
+                        >
+                          <img
+                            src={img.url}
+                            alt={`Thumbnail ${idx + 1}`}
+                            className="w-full h-full object-cover"
+                          />
+                          <span className="absolute bottom-0 right-0 bg-slate-900/80 text-white text-[9px] font-bold px-1 rounded-tl">
+                            {idx + 1}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-center">
+                    <img
+                      src={previewContent || previewItem.publicUrl || previewItem.fileUrl}
+                      alt={previewItem.title}
+                      className="max-h-[60vh] mx-auto rounded-lg shadow-sm border border-slate-200"
+                    />
+                  </div>
+                )
               ) : previewItem.type === 'text' && previewContent ? (
                 <div className="whitespace-pre-wrap font-sans bg-slate-50 p-4 rounded-xl border border-slate-200 leading-relaxed text-slate-800 text-sm">
                   {previewContent}

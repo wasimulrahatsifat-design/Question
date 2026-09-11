@@ -10,8 +10,8 @@ export const ourFileRouter = {
   // General media uploader for PDFs, Images, and Blobs up to 128MB
   mediaUploader: f({
     pdf: { maxFileSize: "128MB", maxFileCount: 1 },
-    image: { maxFileSize: "32MB", maxFileCount: 1 },
-    blob: { maxFileSize: "128MB", maxFileCount: 1 },
+    image: { maxFileSize: "32MB", maxFileCount: 50 },
+    blob: { maxFileSize: "128MB", maxFileCount: 50 },
   })
     .middleware(async () => {
       return { uploadedAt: new Date().toISOString() };
@@ -44,10 +44,10 @@ export const ourFileRouter = {
       };
     }),
 
-  // Image uploader for diagrams, question clips, and screenshots
+  // Image uploader for multi-image folders, diagrams, question clips, and screenshots (up to 50 images)
   imageUploader: f({
-    image: { maxFileSize: "32MB", maxFileCount: 4 },
-    blob: { maxFileSize: "32MB", maxFileCount: 4 },
+    image: { maxFileSize: "32MB", maxFileCount: 50 },
+    blob: { maxFileSize: "32MB", maxFileCount: 50 },
   })
     .middleware(async () => {
       return { uploadedAt: new Date().toISOString() };

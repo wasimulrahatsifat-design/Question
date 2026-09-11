@@ -20,7 +20,7 @@ html {
   font-size: 15px;
 }
 
-* {
+*, ::before, ::after {
   font-family: 'Kalpurush', 'Hind Siliguri', sans-serif !important;
 }
 
